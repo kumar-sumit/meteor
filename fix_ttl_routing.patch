@@ -1,0 +1,55 @@
+# CRITICAL FIX: TTL Command Routing Issue
+# 
+# Problem: TTL commands may be routed to different shards than where keys are stored
+# causing "key not found" (-2) instead of "no TTL" (-1)
+
+# The issue is in the cross-shard routing logic that may route SET and TTL commands 
+# to different shards based on key hash inconsistency.
+
+# SOLUTION 1: Force all commands for the same key to the same shard
+# SOLUTION 2: Disable cross-shard routing for single commands (simpler fix)
+
+# Quick Fix: In process_pipeline_batch method, disable cross-shard routing
+# by forcing all commands to execute locally (which should be the case anyway
+# for commercial LRU+TTL since we don't need cross-shard coordination)
+
+--- meteor_commercial_lru_ttl.cpp.original
++++ meteor_commercial_lru_ttl.cpp.fixed
+
+@@ Lines around 2694-2709: Force local execution for all commands
+
+-            // Determine target shard for this specific command
+-            size_t target_shard = std::hash<std::string>{}(key) % total_shards;
+-            
+-            if (target_shard == current_shard) {
+-                // **LOCAL FAST PATH**: Execute immediately (ZERO overhead)
+-                BatchOperation op(command, key, value, client_fd);
+-                std::string response = execute_single_operation(op);
+-                local_responses.push_back(response);
+-                
+-            } else {
+-                // **CROSS-SHARD PATH**: Send to target shard via message passing
+-                // Execute all commands locally (commercial LRU+TTL doesn't need cross-shard)
+-                BatchOperation op(command, key, value, client_fd);
+-                std::string response = execute_single_operation(op);
+-                local_responses.push_back(response);
+-            }
+
++            // **COMMERCIAL LRU+TTL FIX**: Execute ALL commands locally 
++            // No cross-shard routing needed for commercial cache
++            BatchOperation op(command, key, value, client_fd);
++            std::string response = execute_single_operation(op);
++            local_responses.push_back(response);
+
+
+
+
+
+
+
+
+
+
+
+
+

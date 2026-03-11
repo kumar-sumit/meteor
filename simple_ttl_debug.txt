@@ -1,0 +1,93 @@
+# 🧪 SIMPLE TTL DEBUG - COPY TO VM
+
+# Build and test
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true && sleep 3
+
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread -o meteor_debug meteor_commercial_lru_ttl_routing_consistent.cpp -luring
+
+# Start server
+./meteor_debug -h 127.0.0.1 -p 6379 -c 12 -s 4 -m 2048 &
+SERVER_PID=$!
+sleep 5
+
+# Test basic functionality
+redis-cli -p 6379 ping
+redis-cli -p 6379 flushall
+
+# CRITICAL TEST: SET followed by TTL on same key
+echo "🎯 CRITICAL TEST: SET + TTL on same key"
+redis-cli -p 6379 set test_key "value"
+echo "SET test_key done"
+
+GET_CHECK=$(redis-cli -p 6379 get test_key)
+echo "GET test_key -> '$GET_CHECK'"
+
+TTL_CHECK=$(redis-cli -p 6379 ttl test_key)
+echo "TTL test_key -> $TTL_CHECK"
+
+if [ "$GET_CHECK" = "value" ] && [ "$TTL_CHECK" = "-1" ]; then
+    echo "✅ FIXED! TTL working correctly"
+elif [ "$GET_CHECK" = "value" ] && [ "$TTL_CHECK" = "-2" ]; then
+    echo "❌ BUG: GET finds key but TTL returns -2"
+    echo "   TTL hitting different cache than GET"
+else
+    echo "❌ Other issue: GET='$GET_CHECK', TTL='$TTL_CHECK'"
+fi
+
+# Test with TTL key
+echo ""
+echo "🧪 Testing key with TTL"
+redis-cli -p 6379 set ttl_key "expires" EX 300
+GET_TTL=$(redis-cli -p 6379 get ttl_key)
+TTL_TTL=$(redis-cli -p 6379 ttl ttl_key)
+
+echo "SET ttl_key EX 300"
+echo "GET ttl_key -> '$GET_TTL'"
+echo "TTL ttl_key -> $TTL_TTL"
+
+if [ "$GET_TTL" = "expires" ] && [ "$TTL_TTL" -gt 0 ]; then
+    echo "✅ TTL with EX working!"
+elif [ "$GET_TTL" = "expires" ] && [ "$TTL_TTL" = "-2" ]; then
+    echo "❌ BUG: TTL returning -2 for key with TTL"
+fi
+
+# Cleanup
+kill $SERVER_PID 2>/dev/null
+
+# SINGLE CORE TEST
+echo ""
+echo "🔍 Single core test (eliminate routing completely)"
+./meteor_debug -h 127.0.0.1 -p 6379 -c 1 -s 1 -m 512 &
+SINGLE_PID=$!
+sleep 4
+
+redis-cli -p 6379 flushall
+redis-cli -p 6379 set single_test "single"
+SINGLE_GET=$(redis-cli -p 6379 get single_test)
+SINGLE_TTL=$(redis-cli -p 6379 ttl single_test)
+
+echo "Single core results:"
+echo "GET -> '$SINGLE_GET'"
+echo "TTL -> $SINGLE_TTL"
+
+kill $SINGLE_PID 2>/dev/null
+
+echo ""
+echo "🎯 SHARE THESE RESULTS:"
+echo "Multi-core: GET='$GET_CHECK', TTL='$TTL_CHECK'"
+echo "Single-core: GET='$SINGLE_GET', TTL='$SINGLE_TTL'"
+
+
+
+
+
+
+
+
+
+
+
+
+

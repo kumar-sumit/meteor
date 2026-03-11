@@ -1,0 +1,127 @@
+# 🧪 SIMPLE ROUTING TEST - COPY TO VM
+
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true && sleep 3
+
+# Install boost if needed
+sudo apt update >/dev/null 2>&1
+sudo apt install -y libboost-fiber-dev libboost-context-dev libboost-system-dev >/dev/null 2>&1
+
+echo "🔍 ROUTING CORRECTNESS TEST"
+echo "=========================="
+
+# Build original 1.2B (broken routing)
+echo "Building original 1.2B..."
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread meteor_phase1_2b_syscall_reduction.cpp -o meteor_orig -luring -lboost_fiber -lboost_context -lboost_system
+
+# Build routing-fixed 1.2B
+echo "Building routing-fixed 1.2B..."
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread meteor_phase1_2b_routing_fixed.cpp -o meteor_fixed -luring -lboost_fiber -lboost_context -lboost_system
+
+echo ""
+echo "🧪 Test 1: Original 1.2B (8 cores, auto-detect shards)"
+echo "===================================================="
+./meteor_orig -h 127.0.0.1 -p 6379 -c 8 -s 0 -m 2048 &
+ORIG_PID=$!
+sleep 5
+
+redis-cli -p 6379 flushall
+redis-cli -p 6379 set test_key_orig "test_value_orig"
+ORIG_GET=$(redis-cli -p 6379 get test_key_orig)
+echo "Original SET→GET: '$ORIG_GET'"
+
+# Test multiple keys for routing consistency
+ORIG_FAILURES=0
+for i in {1..10}; do
+    redis-cli -p 6379 set key_$i "value_$i" >/dev/null
+    RESULT=$(redis-cli -p 6379 get key_$i)
+    if [ "$RESULT" != "value_$i" ]; then
+        ORIG_FAILURES=$((ORIG_FAILURES + 1))
+    fi
+done
+echo "Original routing failures: $ORIG_FAILURES/10"
+
+kill $ORIG_PID && sleep 3
+
+echo ""
+echo "🧪 Test 2: Routing-Fixed 1.2B (8 cores, 8 shards)"
+echo "==============================================="
+./meteor_fixed -h 127.0.0.1 -p 6379 -c 8 -s 0 -m 2048 &
+FIXED_PID=$!
+sleep 5
+
+redis-cli -p 6379 flushall
+redis-cli -p 6379 set test_key_fixed "test_value_fixed"
+FIXED_GET=$(redis-cli -p 6379 get test_key_fixed)
+echo "Fixed SET→GET: '$FIXED_GET'"
+
+# Test multiple keys for routing consistency
+FIXED_FAILURES=0
+for i in {1..10}; do
+    redis-cli -p 6379 set fixed_key_$i "fixed_value_$i" >/dev/null
+    RESULT=$(redis-cli -p 6379 get fixed_key_$i)
+    if [ "$RESULT" != "fixed_value_$i" ]; then
+        FIXED_FAILURES=$((FIXED_FAILURES + 1))
+    fi
+done
+echo "Fixed routing failures: $FIXED_FAILURES/10"
+
+# Pipeline test for fixed version
+echo ""
+echo "Pipeline test for fixed version:"
+redis-cli -p 6379 --pipe <<EOF >/dev/null
+SET pipe_test_1 "pipe_value_1"
+SET pipe_test_2 "pipe_value_2"  
+SET pipe_test_3 "pipe_value_3"
+EOF
+
+PIPELINE_FAILURES=0
+for i in {1..3}; do
+    RESULT=$(redis-cli -p 6379 get pipe_test_$i)
+    if [ "$RESULT" != "pipe_value_$i" ]; then
+        PIPELINE_FAILURES=$((PIPELINE_FAILURES + 1))
+    fi
+done
+echo "Fixed pipeline failures: $PIPELINE_FAILURES/3"
+
+kill $FIXED_PID
+
+echo ""
+echo "🎯 ROUTING TEST RESULTS:"
+echo "======================"
+echo "Original 1.2B: $ORIG_FAILURES/10 single failures"
+echo "Fixed 1.2B: $FIXED_FAILURES/10 single failures"
+echo "Fixed pipeline: $PIPELINE_FAILURES/3 failures"
+
+if [ $ORIG_FAILURES -gt 0 ] && [ $FIXED_FAILURES -eq 0 ] && [ $PIPELINE_FAILURES -eq 0 ]; then
+    echo ""
+    echo "🎉 ROUTING FIX SUCCESSFUL!"
+    echo "✅ Original version shows routing issues"
+    echo "✅ Fixed version achieves 100% correctness"
+    echo "✅ Both single and pipeline commands work"
+    echo "✅ Ready to add TTL functionality on top"
+elif [ $FIXED_FAILURES -gt 0 ]; then
+    echo ""
+    echo "❌ Routing still has issues:"
+    echo "Fixed version failures: $FIXED_FAILURES/10"
+    echo "→ Need structural routing investigation"
+else
+    echo ""
+    echo "❓ Unexpected results - need analysis"
+fi
+
+
+
+
+
+
+
+
+
+
+
+
+

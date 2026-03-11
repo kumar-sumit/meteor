@@ -1,0 +1,82 @@
+# 🧪 DIRECT VM TEST COMMANDS - COPY ALL LINES BELOW
+
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true && sleep 3
+
+# Build final fix
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread meteor_commercial_lru_ttl_routing_final.cpp -o meteor_final -luring
+
+# Start server (cores=shards for routing)
+./meteor_final -h 127.0.0.1 -p 6379 -c 6 -s 6 -m 1536 &
+SERVER_PID=$!
+sleep 5
+
+# Test connection
+redis-cli -p 6379 ping
+
+# Clear data
+redis-cli -p 6379 flushall
+
+# TEST 1: Key without TTL
+redis-cli -p 6379 set no_ttl_key "no_ttl_value"
+NO_TTL_GET=$(redis-cli -p 6379 get no_ttl_key)
+NO_TTL_TTL=$(redis-cli -p 6379 ttl no_ttl_key)
+echo "Test 1 - No TTL: GET='$NO_TTL_GET', TTL='$NO_TTL_TTL'"
+
+# TEST 2: Key with TTL (SET EX)
+redis-cli -p 6379 set ttl_key "ttl_value" EX 300
+TTL_GET=$(redis-cli -p 6379 get ttl_key)
+TTL_TTL=$(redis-cli -p 6379 ttl ttl_key)
+echo "Test 2 - With TTL: GET='$TTL_GET', TTL='$TTL_TTL'"
+
+# TEST 3: EXPIRE command
+redis-cli -p 6379 set expire_key "expire_value"
+redis-cli -p 6379 expire expire_key 600
+EXPIRE_GET=$(redis-cli -p 6379 get expire_key)
+EXPIRE_TTL=$(redis-cli -p 6379 ttl expire_key)
+echo "Test 3 - EXPIRE: GET='$EXPIRE_GET', TTL='$EXPIRE_TTL'"
+
+# TEST 4: Nonexistent key
+NONE_TTL=$(redis-cli -p 6379 ttl nonexistent_key)
+echo "Test 4 - Nonexistent: TTL='$NONE_TTL'"
+
+# Results check
+echo ""
+echo "🎯 EXPECTED RESULTS:"
+echo "Test 1: GET='no_ttl_value', TTL='-1'"
+echo "Test 2: GET='ttl_value', TTL='>0'"
+echo "Test 3: GET='expire_value', TTL='>0'"  
+echo "Test 4: TTL='-2'"
+
+# Quick success check
+if [ "$NO_TTL_TTL" = "-1" ] && [ "$TTL_TTL" -gt 0 ] && [ "$EXPIRE_TTL" -gt 0 ] && [ "$NONE_TTL" = "-2" ]; then
+    echo ""
+    echo "🎉 SUCCESS: All TTL tests PASSED!"
+    echo "✅ TTL routing completely fixed!"
+else
+    echo ""
+    echo "❌ Some tests still failing:"
+    echo "No TTL result: '$NO_TTL_TTL' (should be -1)"
+    echo "With TTL result: '$TTL_TTL' (should be >0)"
+    echo "EXPIRE result: '$EXPIRE_TTL' (should be >0)"
+    echo "Nonexistent result: '$NONE_TTL' (should be -2)"
+fi
+
+# Cleanup
+kill $SERVER_PID 2>/dev/null
+
+
+
+
+
+
+
+
+
+
+
+
+

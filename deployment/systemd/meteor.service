@@ -1,0 +1,80 @@
+[Unit]
+Description=Meteor High-Performance Redis-Compatible Server
+Documentation=https://github.com/meteor-server/meteor
+After=network.target network-online.target
+Wants=network-online.target
+RequiresMountsFor=/var/lib/meteor
+
+[Service]
+Type=forking
+User=meteor
+Group=meteor
+RuntimeDirectory=meteor
+RuntimeDirectoryMode=0755
+PIDFile=/run/meteor/meteor.pid
+
+# Working Directory
+WorkingDirectory=/opt/meteor
+
+# Environment Variables
+Environment=METEOR_CONFIG=/etc/meteor/meteor.conf
+Environment=METEOR_DATA=/var/lib/meteor
+Environment=METEOR_LOG=/var/log/meteor
+Environment=MALLOC_CONF=background_thread:true,metadata_thp:auto
+EnvironmentFile=-/etc/default/meteor
+
+# Security Settings
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/meteor /var/log/meteor /run/meteor
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+
+# Resource Limits
+LimitNOFILE=65536
+LimitNPROC=65536
+LimitMEMLOCK=infinity
+LimitAS=infinity
+LimitCORE=infinity
+TasksMax=65536
+
+# CPU and Memory Settings
+CPUSchedulingPolicy=2
+CPUSchedulingPriority=50
+Nice=-10
+
+# Start/Stop Commands
+ExecStartPre=/opt/meteor/bin/pre-start-checks.sh
+ExecStart=/opt/meteor/bin/meteor-server --config ${METEOR_CONFIG} --daemonize
+ExecReload=/bin/kill -USR2 $MAINPID
+ExecStop=/bin/kill -TERM $MAINPID
+ExecStopPost=/opt/meteor/bin/post-stop-cleanup.sh
+
+# Health Monitoring
+ExecStartPost=/bin/sleep 5
+ExecStartPost=/opt/meteor/bin/healthcheck.sh
+WatchdogSec=30
+NotifyAccess=main
+
+# Restart Policy
+Restart=always
+RestartSec=10
+StartLimitInterval=0
+StartLimitBurst=3
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=meteor
+SyslogLevel=info
+
+[Install]
+WantedBy=multi-user.target

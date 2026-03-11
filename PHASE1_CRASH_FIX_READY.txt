@@ -1,0 +1,32 @@
+cpp/meteor_prod_v4_issue_fixes.cpp
+
+
+🧪 **TESTING INSTRUCTIONS FOR PHASE 1**:
+
+1. **Build the crash-fixed version**:
+```bash
+cd /dev/shm  
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -pthread -mavx512f -mavx512dq -mavx2 -mavx -msse4.2 -msse4.1 -mfma \
+    -o meteor_crash_fixed meteor_prod_v4_issue_fixes.cpp \  
+    -lboost_fiber -lboost_context -lboost_system -luring
+```
+
+2. **Test crash resilience**:
+```bash
+# Start server
+./meteor_crash_fixed -c 4 -s 4
+
+# Run memtier multiple times (should NOT crash)
+memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis \
+  --clients=30 --threads=8 --pipeline=1 --data-size=64 \
+  --key-pattern=R:R --ratio=1:1 --requests=10000 --hide-histogram
+
+# Run again immediately (CRITICAL TEST)
+memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis \
+  --clients=30 --threads=8 --pipeline=1 --data-size=64 \
+  --key-pattern=R:R --ratio=1:1 --requests=10000 --hide-histogram
+```
+
+**Expected Result**: Server should handle multiple memtier runs without crashes.
+
+**If successful, confirm and we will proceed to Phase 2 (performance fix).**

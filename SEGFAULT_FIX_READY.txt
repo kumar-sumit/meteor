@@ -1,0 +1,30 @@
+🧪 **SEGFAULT FIX TESTING PROTOCOL**
+
+## **BUILD & TEST COMMANDS**:
+
+```bash
+# Build the segfault-fixed version
+cd /dev/shm
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -pthread -mavx512f -mavx512dq -mavx2 -mavx -msse4.2 -msse4.1 -mfma \
+    -o meteor_segfault_fixed /path/to/meteor_segfault_fix.cpp \
+    -lboost_fiber -lboost_context -lboost_system -luring
+
+# Start server  
+./meteor_segfault_fixed -c 4 -s 4
+
+# Test the EXACT command that was crashing
+memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis \
+  --clients=30 --threads=8 --pipeline=1 --data-size=64 \
+  --key-pattern=R:R --ratio=1:1 --requests=100000 \
+  --hide-histogram
+```
+
+## **EXPECTED RESULT**: 
+- ✅ **NO segmentation fault**
+- ✅ **Server remains stable**  
+- ✅ **All commands work correctly**
+
+## **CRITICAL**: This fix targets the exact segfault cause
+**If this works, we can proceed to Phase 2 (performance optimization)**
+
+**Please test this version - it should finally eliminate the segfault!** 🚀

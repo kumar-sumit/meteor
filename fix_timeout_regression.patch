@@ -1,0 +1,51 @@
+# CRITICAL FIX: Timeout Regression in Integrated Server
+# 
+# PROBLEM IDENTIFIED: 
+# - Line 505: future.wait_for(std::chrono::milliseconds(100)) is causing timeout errors
+# - 100ms timeout is way too aggressive for command processing
+# - This is causing the 9-10 ops/sec performance regression
+#
+# ROOT CAUSE:
+# The integrated server added aggressive 100ms timeouts that weren't in the baseline
+# This causes legitimate commands to timeout and return "-ERR timeout"
+#
+# SOLUTION:
+# 1. Increase timeout to 5 seconds for normal operation
+# 2. Add proper error handling and diagnostics
+# 3. Consider removing timeout for basic commands entirely
+
+--- a/cpp/sharded_server_phase8_step25_io_uring_boost_fiber_integrated.cpp
++++ b/cpp/sharded_server_phase8_step25_io_uring_boost_fiber_integrated.cpp
+
+@@ -502,7 +502,10 @@ class BoostFiberIntegratedTemporalServer {
+         for (auto& future : response_futures) {
+             try {
+-                // **FIBER-FRIENDLY WAIT**: With timeout
+-                auto status = future.wait_for(std::chrono::milliseconds(100));
++                // **FIBER-FRIENDLY WAIT**: With reasonable timeout (REGRESSION FIX)
++                // Changed from 100ms (too aggressive) to 5000ms (reasonable)
++                // TODO: Consider removing timeout entirely for basic commands
++                auto status = future.wait_for(std::chrono::milliseconds(5000));
+                 
+                 if (status == boost::fibers::future_status::ready) {
+                     combined_response += future.get();
+
+# ADDITIONAL DEBUGGING INFO:
+# - The baseline server processes commands directly without timeouts
+# - The integrated server added fiber processing which can take longer
+# - Need to measure actual command processing time to set proper timeout
+# - Consider async processing without blocking waits
+
+
+
+
+
+
+
+
+
+
+
+
+
+

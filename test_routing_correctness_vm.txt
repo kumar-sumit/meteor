@@ -1,0 +1,263 @@
+# 🔍 COMPREHENSIVE ROUTING CORRECTNESS TEST - COPY TO VM
+
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true
+sleep 3
+
+echo "🧪 COMPREHENSIVE ROUTING CORRECTNESS TEST"
+echo "========================================="
+
+# ===== STEP 1: Test Original 1.2B (Broken Routing) =====
+echo ""
+echo "🔍 STEP 1: Original 1.2B Syscall (Should show routing issues)"
+echo "============================================================"
+
+# Install boost if needed
+if ! ldconfig -p | grep -q boost_fiber; then
+    echo "Installing boost::fibers..."
+    sudo apt update >/dev/null 2>&1
+    sudo apt install -y libboost-fiber-dev libboost-context-dev libboost-system-dev >/dev/null 2>&1
+fi
+
+# Build original 1.2B
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread \
+    meteor_phase1_2b_syscall_reduction.cpp -o meteor_original_1_2b \
+    -luring -lboost_fiber -lboost_context -lboost_system >/dev/null 2>&1
+
+if [ $? -eq 0 ]; then
+    echo "✅ Original 1.2B built"
+    
+    # Test with default auto-detect (should use fewer shards than cores)
+    echo "Testing original 1.2B with auto-detect (cores > shards)..."
+    ./meteor_original_1_2b -h 127.0.0.1 -p 6379 -c 8 -s 0 -m 2048 &
+    ORIG_PID=$!
+    sleep 5
+    
+    if redis-cli -p 6379 ping >/dev/null 2>&1; then
+        redis-cli -p 6379 flushall >/dev/null
+        
+        # Test single command correctness
+        echo "Single command test:"
+        ORIG_SINGLE_FAILURES=0
+        for i in {1..20}; do
+            redis-cli -p 6379 set orig_single_$i "orig_value_$i" >/dev/null
+            RESULT=$(redis-cli -p 6379 get orig_single_$i)
+            if [ "$RESULT" != "orig_value_$i" ]; then
+                ORIG_SINGLE_FAILURES=$((ORIG_SINGLE_FAILURES + 1))
+                if [ $ORIG_SINGLE_FAILURES -eq 1 ]; then
+                    echo "❌ First failure: set orig_single_$i → get returned '$RESULT'"
+                fi
+            fi
+        done
+        echo "Original 1.2B single command failures: $ORIG_SINGLE_FAILURES/20"
+        
+        # Test pipeline correctness  
+        echo ""
+        echo "Pipeline test:"
+        redis-cli -p 6379 --pipe <<EOF >/dev/null
+SET orig_pipe_1 "orig_pipe_value_1"
+SET orig_pipe_2 "orig_pipe_value_2"
+SET orig_pipe_3 "orig_pipe_value_3"
+SET orig_pipe_4 "orig_pipe_value_4"
+SET orig_pipe_5 "orig_pipe_value_5"
+EOF
+        
+        ORIG_PIPELINE_FAILURES=0
+        for i in {1..5}; do
+            RESULT=$(redis-cli -p 6379 get orig_pipe_$i)
+            if [ "$RESULT" != "orig_pipe_value_$i" ]; then
+                ORIG_PIPELINE_FAILURES=$((ORIG_PIPELINE_FAILURES + 1))
+                if [ $ORIG_PIPELINE_FAILURES -eq 1 ]; then
+                    echo "❌ First pipeline failure: get orig_pipe_$i → '$RESULT'"
+                fi
+            fi
+        done
+        echo "Original 1.2B pipeline failures: $ORIG_PIPELINE_FAILURES/5"
+        
+    else
+        echo "❌ Original 1.2B server not responding"
+        ORIG_SINGLE_FAILURES="N/A"
+        ORIG_PIPELINE_FAILURES="N/A"
+    fi
+    
+    kill $ORIG_PID 2>/dev/null && sleep 3
+else
+    echo "❌ Original 1.2B build failed"
+    ORIG_SINGLE_FAILURES="N/A"
+    ORIG_PIPELINE_FAILURES="N/A"
+fi
+
+# ===== STEP 2: Test Routing-Fixed 1.2B =====
+echo ""
+echo "🔍 STEP 2: Routing-Fixed 1.2B (Should work correctly)"
+echo "===================================================="
+
+# Build routing-fixed 1.2B
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread \
+    meteor_phase1_2b_routing_fixed.cpp -o meteor_fixed_1_2b \
+    -luring -lboost_fiber -lboost_context -lboost_system >/dev/null 2>&1
+
+if [ $? -eq 0 ]; then
+    echo "✅ Routing-fixed 1.2B built"
+    
+    # Test with auto-detect (should use cores=shards now)
+    echo "Testing routing-fixed 1.2B with auto-detect (cores = shards)..."
+    ./meteor_fixed_1_2b -h 127.0.0.1 -p 6379 -c 8 -s 0 -m 2048 &
+    FIXED_PID=$!
+    sleep 5
+    
+    if redis-cli -p 6379 ping >/dev/null 2>&1; then
+        redis-cli -p 6379 flushall >/dev/null
+        
+        # Test single command correctness
+        echo "Single command test:"
+        FIXED_SINGLE_FAILURES=0
+        for i in {1..20}; do
+            redis-cli -p 6379 set fixed_single_$i "fixed_value_$i" >/dev/null
+            RESULT=$(redis-cli -p 6379 get fixed_single_$i)
+            if [ "$RESULT" != "fixed_value_$i" ]; then
+                FIXED_SINGLE_FAILURES=$((FIXED_SINGLE_FAILURES + 1))
+                if [ $FIXED_SINGLE_FAILURES -eq 1 ]; then
+                    echo "❌ First failure: set fixed_single_$i → get returned '$RESULT'"
+                fi
+            fi
+        done
+        echo "Routing-fixed 1.2B single command failures: $FIXED_SINGLE_FAILURES/20"
+        
+        # Test pipeline correctness
+        echo ""
+        echo "Pipeline test:"
+        redis-cli -p 6379 --pipe <<EOF >/dev/null
+SET fixed_pipe_1 "fixed_pipe_value_1"
+SET fixed_pipe_2 "fixed_pipe_value_2"
+SET fixed_pipe_3 "fixed_pipe_value_3"
+SET fixed_pipe_4 "fixed_pipe_value_4"
+SET fixed_pipe_5 "fixed_pipe_value_5"
+EOF
+        
+        FIXED_PIPELINE_FAILURES=0
+        for i in {1..5}; do
+            RESULT=$(redis-cli -p 6379 get fixed_pipe_$i)
+            if [ "$RESULT" != "fixed_pipe_value_$i" ]; then
+                FIXED_PIPELINE_FAILURES=$((FIXED_PIPELINE_FAILURES + 1))
+                if [ $FIXED_PIPELINE_FAILURES -eq 1 ]; then
+                    echo "❌ First pipeline failure: get fixed_pipe_$i → '$RESULT'"
+                fi
+            fi
+        done
+        echo "Routing-fixed 1.2B pipeline failures: $FIXED_PIPELINE_FAILURES/5"
+        
+        # Performance test if routing is fixed
+        if [ $FIXED_SINGLE_FAILURES -eq 0 ] && [ $FIXED_PIPELINE_FAILURES -eq 0 ]; then
+            echo ""
+            echo "🚀 All routing tests passed! Running performance test..."
+            echo "====================================================="
+            
+            memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis \
+                --clients=30 --threads=8 --pipeline=10 --data-size=64 \
+                --key-pattern=R:R --ratio=1:3 --test-time=15
+        fi
+        
+    else
+        echo "❌ Routing-fixed 1.2B server not responding"
+        FIXED_SINGLE_FAILURES="N/A"
+        FIXED_PIPELINE_FAILURES="N/A"
+    fi
+    
+    kill $FIXED_PID 2>/dev/null && sleep 3
+else
+    echo "❌ Routing-fixed 1.2B build failed"
+    FIXED_SINGLE_FAILURES="N/A"
+    FIXED_PIPELINE_FAILURES="N/A"
+fi
+
+# ===== STEP 3: Test Baseline Production =====
+echo ""
+echo "🔍 STEP 3: Baseline Production (Reference)"
+echo "========================================="
+
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread \
+    meteor_baseline_production.cpp -o meteor_baseline_test \
+    -luring >/dev/null 2>&1
+
+if [ $? -eq 0 ]; then
+    echo "✅ Baseline production built"
+    
+    # Test baseline production routing
+    ./meteor_baseline_test -h 127.0.0.1 -p 6379 -c 6 -s 6 -m 1536 &
+    BASELINE_PID=$!
+    sleep 5
+    
+    if redis-cli -p 6379 ping >/dev/null 2>&1; then
+        redis-cli -p 6379 flushall >/dev/null
+        
+        BASELINE_FAILURES=0
+        for i in {1..10}; do
+            redis-cli -p 6379 set baseline_$i "baseline_value_$i" >/dev/null
+            RESULT=$(redis-cli -p 6379 get baseline_$i)
+            if [ "$RESULT" != "baseline_value_$i" ]; then
+                BASELINE_FAILURES=$((BASELINE_FAILURES + 1))
+            fi
+        done
+        echo "Baseline production failures: $BASELINE_FAILURES/10"
+        
+    else
+        echo "❌ Baseline production not responding"
+        BASELINE_FAILURES="N/A"
+    fi
+    
+    kill $BASELINE_PID 2>/dev/null
+else
+    echo "❌ Baseline production build failed"
+    BASELINE_FAILURES="N/A"
+fi
+
+# ===== RESULTS SUMMARY =====
+echo ""
+echo "🎯 ROUTING CORRECTNESS TEST RESULTS:"
+echo "===================================="
+echo ""
+echo "Original 1.2B (cores > shards):"
+echo "  Single command failures: $ORIG_SINGLE_FAILURES/20"
+echo "  Pipeline failures: $ORIG_PIPELINE_FAILURES/5"
+echo ""
+echo "Routing-Fixed 1.2B (cores = shards):"
+echo "  Single command failures: $FIXED_SINGLE_FAILURES/20"
+echo "  Pipeline failures: $FIXED_PIPELINE_FAILURES/5"
+echo ""
+echo "Baseline Production (reference):"
+echo "  Single command failures: $BASELINE_FAILURES/10"
+echo ""
+echo "🎯 EXPECTED PATTERN:"
+echo "✅ Original 1.2B should show many failures"
+echo "✅ Routing-fixed 1.2B should show 0 failures"
+echo "✅ Baseline production should show 0 failures (if it was already fixed)"
+echo ""
+echo "CONCLUSION:"
+if [ "$FIXED_SINGLE_FAILURES" = "0" ] && [ "$FIXED_PIPELINE_FAILURES" = "0" ]; then
+    echo "🎉 ROUTING FIX SUCCESSFUL!"
+    echo "✅ Routing-fixed 1.2B achieves 100% correctness"
+    echo "✅ Ready to apply TTL functionality on top"
+elif [ "$ORIG_SINGLE_FAILURES" -gt 0 ] && [ "$FIXED_SINGLE_FAILURES" -lt "$ORIG_SINGLE_FAILURES" ]; then
+    echo "🔄 PARTIAL SUCCESS - routing improved but not perfect"
+    echo "→ Need further routing refinements"
+else
+    echo "❌ ROUTING FIX FAILED - no improvement shown"
+    echo "→ Need to investigate routing implementation"
+fi
+
+
+
+
+
+
+
+
+
+
+
+
+

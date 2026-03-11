@@ -1,0 +1,217 @@
+# 🚀 COMPLETE VM FIX & TEST PROTOCOL
+
+# ===== SSH TO VM =====
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+# ===== STEP 1: FIX BOOST::FIBERS COMPILATION =====
+echo "🔧 STEP 1: Installing Boost::Fibers library..."
+sudo apt update
+sudo apt install -y libboost-fiber-dev libboost-context-dev libboost-system-dev
+
+# Verify boost installation
+if ldconfig -p | grep -q boost_fiber; then
+    echo "✅ Boost::Fibers library installed"
+else
+    echo "❌ Boost::Fibers installation failed"
+fi
+
+# ===== STEP 2: BUILD AND TEST PHASE 1.2B =====
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true
+sleep 3
+
+echo ""
+echo "🔧 STEP 2: Building Phase 1.2B with boost::fibers..."
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread \
+    meteor_phase1_2b_syscall_reduction.cpp \
+    -o meteor_1_2b_boost \
+    -luring -lboost_fiber -lboost_context -lboost_system
+
+if [ $? -eq 0 ]; then
+    echo "✅ Phase 1.2B built successfully!"
+    
+    echo ""
+    echo "🔍 STEP 2A: Testing Phase 1.2B routing issue"
+    echo "============================================"
+    
+    # Test with cores > shards (should show routing failures)
+    echo "Testing 4C:2S (cores > shards, should fail)..."
+    ./meteor_1_2b_boost -h 127.0.0.1 -p 6379 -c 4 -s 2 -m 1024 &
+    PID_4C2S=$!
+    sleep 5
+    
+    redis-cli -p 6379 flushall
+    redis-cli -p 6379 set routing_test_1 "test_value_1"
+    RESULT_4C2S=$(redis-cli -p 6379 get routing_test_1)
+    
+    echo "4C:2S → SET then GET: '$RESULT_4C2S'"
+    
+    if [ -z "$RESULT_4C2S" ]; then
+        echo "❌ CONFIRMED: 4C:2S has routing issue (GET fails after SET)"
+    else
+        echo "✅ 4C:2S working (unexpected)"
+    fi
+    
+    kill $PID_4C2S && sleep 3
+    
+    # Test with cores = shards (should work)
+    echo ""
+    echo "Testing 4C:4S (cores = shards, should work)..."
+    ./meteor_1_2b_boost -h 127.0.0.1 -p 6379 -c 4 -s 4 -m 1024 &
+    PID_4C4S=$!
+    sleep 5
+    
+    redis-cli -p 6379 flushall
+    redis-cli -p 6379 set routing_test_2 "test_value_2"
+    RESULT_4C4S=$(redis-cli -p 6379 get routing_test_2)
+    
+    echo "4C:4S → SET then GET: '$RESULT_4C4S'"
+    
+    if [ "$RESULT_4C4S" = "test_value_2" ]; then
+        echo "✅ CONFIRMED: 4C:4S fixes routing issue!"
+    else
+        echo "❌ 4C:4S still broken"
+    fi
+    
+    kill $PID_4C4S && sleep 3
+    
+else
+    echo "❌ Phase 1.2B build failed - proceeding with commercial version"
+fi
+
+# ===== STEP 3: TEST ROUTING-FIXED COMMERCIAL LRU+TTL =====
+echo ""
+echo "🔧 STEP 3: Testing routing-fixed commercial LRU+TTL"
+echo "=================================================="
+
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread \
+    meteor_commercial_lru_ttl_routing_fixed.cpp \
+    -o meteor_commercial_routing_fixed \
+    -luring
+
+if [ $? -eq 0 ]; then
+    echo "✅ Routing-fixed commercial LRU+TTL built successfully!"
+    
+    # Test with auto cores=shards (should fix TTL)
+    echo ""
+    echo "🧪 Testing TTL with automatic cores=shards fix..."
+    ./meteor_commercial_routing_fixed -h 127.0.0.1 -p 6379 -c 6 -s 0 -m 1536 &
+    FIXED_PID=$!
+    sleep 5
+    
+    if redis-cli -p 6379 ping >/dev/null 2>&1; then
+        echo "✅ Routing-fixed server responding"
+        
+        redis-cli -p 6379 flushall
+        
+        # CRITICAL TTL TEST
+        echo ""
+        echo "🎯 CRITICAL TTL TEST (should now work correctly):"
+        echo "================================================"
+        
+        # Test 1: Key without TTL
+        redis-cli -p 6379 set no_ttl_key "no_ttl_value"
+        NO_TTL_GET=$(redis-cli -p 6379 get no_ttl_key)
+        NO_TTL_TTL=$(redis-cli -p 6379 ttl no_ttl_key)
+        
+        echo "Key without TTL:"
+        echo "GET no_ttl_key -> '$NO_TTL_GET'"
+        echo "TTL no_ttl_key -> $NO_TTL_TTL"
+        
+        # Test 2: Key with TTL
+        redis-cli -p 6379 set ttl_key "ttl_value" EX 120
+        TTL_GET=$(redis-cli -p 6379 get ttl_key)
+        TTL_TTL=$(redis-cli -p 6379 ttl ttl_key)
+        
+        echo ""
+        echo "Key with TTL:"
+        echo "GET ttl_key -> '$TTL_GET'"
+        echo "TTL ttl_key -> $TTL_TTL"
+        
+        # Test 3: Nonexistent key
+        NONE_TTL=$(redis-cli -p 6379 ttl nonexistent_key)
+        echo ""
+        echo "Nonexistent key:"
+        echo "TTL nonexistent_key -> $NONE_TTL"
+        
+        # ===== RESULTS ANALYSIS =====
+        echo ""
+        echo "🏆 TTL TEST RESULTS ANALYSIS:"
+        echo "============================"
+        
+        if [ "$NO_TTL_GET" = "no_ttl_value" ] && [ "$NO_TTL_TTL" = "-1" ]; then
+            echo "✅ Test 1 PASSED: Key without TTL correctly returns -1"
+        else
+            echo "❌ Test 1 FAILED: Expected GET='no_ttl_value', TTL='-1'"
+            echo "   Got: GET='$NO_TTL_GET', TTL='$NO_TTL_TTL'"
+        fi
+        
+        if [ "$TTL_GET" = "ttl_value" ] && [ "$TTL_TTL" -gt 0 ] && [ "$TTL_TTL" -le 120 ]; then
+            echo "✅ Test 2 PASSED: Key with TTL correctly returns >0"
+        else
+            echo "❌ Test 2 FAILED: Expected GET='ttl_value', TTL>0"
+            echo "   Got: GET='$TTL_GET', TTL='$TTL_TTL'"
+        fi
+        
+        if [ "$NONE_TTL" = "-2" ]; then
+            echo "✅ Test 3 PASSED: Nonexistent key correctly returns -2"
+        else
+            echo "❌ Test 3 FAILED: Expected TTL='-2'"
+            echo "   Got: TTL='$NONE_TTL'"
+        fi
+        
+        # ===== PERFORMANCE TEST =====
+        if [ "$NO_TTL_TTL" = "-1" ] && [ "$TTL_TTL" -gt 0 ] && [ "$NONE_TTL" = "-2" ]; then
+            echo ""
+            echo "🎉 ALL TTL TESTS PASSED! Running performance benchmark..."
+            echo "======================================================="
+            
+            memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis --clients=30 --threads=6 --pipeline=10 --data-size=64 --key-pattern=R:R --ratio=1:3 --test-time=20
+            
+            echo ""
+            echo "🏆 SUCCESS: TTL routing issue fixed with cores=shards!"
+        else
+            echo ""
+            echo "❌ TTL tests still failing - need deeper investigation"
+        fi
+        
+    else
+        echo "❌ Routing-fixed server not responding"
+    fi
+    
+    kill $FIXED_PID 2>/dev/null
+else
+    echo "❌ Commercial routing-fixed build failed"
+fi
+
+# ===== SUMMARY =====
+echo ""
+echo "🎯 COMPLETE TEST SUMMARY"
+echo "======================="
+echo ""
+echo "Phase 1.2B routing results:"
+echo "4C:2S (cores>shards): '$RESULT_4C2S'"
+echo "4C:4S (cores=shards): '$RESULT_4C4S'"
+echo ""
+echo "Commercial LRU+TTL results (with routing fix):"
+echo "Key without TTL: GET='$NO_TTL_GET', TTL='$NO_TTL_TTL'"
+echo "Key with TTL: GET='$TTL_GET', TTL='$TTL_TTL'"
+echo "Nonexistent key: TTL='$NONE_TTL'"
+echo ""
+echo "EXPECTED SUCCESS PATTERN:"
+echo "✅ Phase 1.2B: 4C:2S fails, 4C:4S works"
+echo "✅ Commercial: All TTL tests pass (-1, >0, -2)"
+
+
+
+
+
+
+
+
+
+
+
+
+

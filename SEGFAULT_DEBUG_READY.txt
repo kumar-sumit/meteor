@@ -1,0 +1,43 @@
+🧪 **SEGFAULT DEBUG PROTOCOL - PRODUCTION READY**
+
+## **BUILD & DEPLOY COMMANDS**:
+
+```bash
+# Upload debug version to VM
+gcloud compute scp cpp/meteor_segfault_debug.cpp memtier-benchmarking:/dev/shm/ --zone "asia-southeast1-a" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+# Build debug version  
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>" -- 'cd /dev/shm && export TMPDIR=/dev/shm && g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -pthread -mavx512f -mavx512dq -mavx2 -mavx -msse4.2 -msse4.1 -mfma -o meteor_debug_trace meteor_segfault_debug.cpp -lboost_fiber -lboost_context -lboost_system -luring'\
+
+# Copy to target VM
+gcloud compute scp --zone "asia-southeast1-a" memtier-benchmarking:/dev/shm/meteor_debug_trace /tmp/ --tunnel-through-iap --project "<your-gcp-project-id>"
+gcloud compute scp /tmp/meteor_debug_trace mcache-lssd-sumit:/dev/shm/ --zone "asia-southeast1-a" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+# Make executable
+gcloud compute ssh --zone "asia-southeast1-a" "mcache-lssd-sumit" --tunnel-through-iap --project "<your-gcp-project-id>" -- 'cd /dev/shm && chmod +x meteor_debug_trace'\
+```
+
+## **SYSTEMATIC DEBUG TEST**:
+
+```bash
+# Start debug server with logging
+./meteor_debug_trace -c 4 -s 4 > debug.log 2>&1 &
+
+# Run the EXACT failing test (reduce load first for cleaner logs)
+./memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis \
+  --clients=10 --threads=4 --pipeline=1 --data-size=64 \
+  --key-pattern=R:R --ratio=1:1 --requests=5000 \
+  --hide-histogram
+
+# If that works, increase load progressively:
+# --clients=20 --threads=6 --requests=10000
+# --clients=30 --threads=8 --requests=50000 (original failing test)
+```
+
+## **LOG ANALYSIS**:
+- 🔍 **Identify exact crash point** from debug logs
+- 📊 **Monitor FD validation failures**
+- ⚠️ **Watch for writev() system call errors**
+- 🚨 **Track memory pressure indicators**
+
+**This will pinpoint the EXACT segfault cause systematically!** 🎯

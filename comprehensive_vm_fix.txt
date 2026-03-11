@@ -1,0 +1,151 @@
+# 🚀 COMPREHENSIVE VM FIX: Routing + Boost::Fibers
+
+# ===== SSH TO VM =====
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+# ===== FIX 1: INSTALL BOOST::FIBERS =====
+echo "🔧 Installing Boost::Fibers library..."
+sudo apt update
+sudo apt install -y libboost-fiber-dev libboost-context-dev libboost-system-dev libboost-all-dev
+
+# ===== FIX 2: BUILD PHASE 1.2B WITH BOOST =====
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true
+sleep 3
+
+echo "🔧 Building Phase 1.2B with boost::fibers..."
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread \
+    -o meteor_1_2b_boost meteor_phase1_2b_syscall_reduction.cpp \
+    -luring -lboost_fiber -lboost_context -lboost_system
+
+if [ $? -eq 0 ]; then
+    echo "✅ Phase 1.2B built successfully with boost::fibers!"
+    
+    # ===== TEST ROUTING ISSUE =====
+    echo ""
+    echo "🔍 TESTING ROUTING ISSUE WITH PHASE 1.2B"
+    echo "========================================"
+    
+    # Test 1: cores > shards (routing broken)
+    echo "Test 1: 6C:3S - Should show routing failures"
+    ./meteor_1_2b_boost -h 127.0.0.1 -p 6379 -c 6 -s 3 -m 1536 &
+    PID1=$!
+    sleep 5
+    
+    redis-cli -p 6379 flushall
+    
+    FAILURES_6C3S=0
+    for i in {1..10}; do
+        redis-cli -p 6379 set test_6c3s_$i "value_$i" >/dev/null
+        RESULT=$(redis-cli -p 6379 get test_6c3s_$i)
+        if [ "$RESULT" != "value_$i" ]; then
+            FAILURES_6C3S=$((FAILURES_6C3S + 1))
+        fi
+    done
+    
+    echo "6C:3S routing failures: $FAILURES_6C3S/10"
+    kill $PID1 && sleep 3
+    
+    # Test 2: cores = shards (routing fixed)
+    echo ""
+    echo "Test 2: 6C:6S - Should fix routing"
+    ./meteor_1_2b_boost -h 127.0.0.1 -p 6379 -c 6 -s 6 -m 1536 &
+    PID2=$!
+    sleep 5
+    
+    redis-cli -p 6379 flushall
+    
+    FAILURES_6C6S=0
+    for i in {1..10}; do
+        redis-cli -p 6379 set test_6c6s_$i "value_$i" >/dev/null
+        RESULT=$(redis-cli -p 6379 get test_6c6s_$i)
+        if [ "$RESULT" != "value_$i" ]; then
+            FAILURES_6C6S=$((FAILURES_6C6S + 1))
+        fi
+    done
+    
+    echo "6C:6S routing failures: $FAILURES_6C6S/10"
+    kill $PID2 && sleep 3
+    
+    # Results
+    echo ""
+    echo "🎯 ROUTING TEST RESULTS:"
+    echo "cores > shards (6C:3S): $FAILURES_6C3S/10 failures"
+    echo "cores = shards (6C:6S): $FAILURES_6C6S/10 failures"
+    
+    if [ $FAILURES_6C3S -gt 0 ] && [ $FAILURES_6C6S -eq 0 ]; then
+        echo "✅ ROUTING ISSUE CONFIRMED AND SOLUTION FOUND!"
+        echo "   → cores=shards fixes the routing problem"
+        echo "   → Apply this to commercial LRU+TTL version"
+    fi
+    
+    # ===== PERFORMANCE TEST =====
+    echo ""
+    echo "🚀 Quick performance test with fixed routing (6C:6S):"
+    ./meteor_1_2b_boost -h 127.0.0.1 -p 6379 -c 6 -s 6 -m 1536 &
+    PERF_PID=$!
+    sleep 5
+    
+    # 15-second benchmark
+    memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis --clients=20 --threads=6 --pipeline=10 --data-size=64 --key-pattern=R:R --ratio=1:3 --test-time=15
+    
+    kill $PERF_PID 2>/dev/null
+    
+else
+    echo "❌ Build failed - boost::fibers library issue"
+    echo ""
+    echo "FALLBACK: Use boost-free commercial LRU+TTL version instead"
+    echo "It doesn't have boost dependencies and already has TTL functionality"
+    
+    # Test commercial LRU+TTL with cores=shards fix
+    echo "🔧 Testing commercial LRU+TTL with cores=shards..."
+    
+    g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread \
+        -o meteor_commercial_fixed meteor_commercial_lru_ttl_routing_consistent.cpp -luring
+    
+    if [ $? -eq 0 ]; then
+        echo "✅ Commercial LRU+TTL builds without boost!"
+        
+        # Test with cores=shards
+        ./meteor_commercial_fixed -h 127.0.0.1 -p 6379 -c 6 -s 6 -m 1536 &
+        COMM_PID=$!
+        sleep 5
+        
+        redis-cli -p 6379 flushall
+        redis-cli -p 6379 set commercial_test "commercial_value"
+        COMM_GET=$(redis-cli -p 6379 get commercial_test)
+        COMM_TTL=$(redis-cli -p 6379 ttl commercial_test)
+        
+        echo "Commercial LRU+TTL test (6C:6S):"
+        echo "GET -> '$COMM_GET'"
+        echo "TTL -> $COMM_TTL"
+        
+        if [ "$COMM_GET" = "commercial_value" ] && [ "$COMM_TTL" = "-1" ]; then
+            echo "🎉 Commercial LRU+TTL working with cores=shards!"
+            echo "   → TTL issue potentially fixed by cores=shards"
+        fi
+        
+        kill $COMM_PID 2>/dev/null
+    fi
+fi
+
+echo ""
+echo "🎯 SUMMARY:"
+echo "1. Install boost::fibers library"
+echo "2. Build Phase 1.2B with proper linker flags"
+echo "3. Test routing with cores=shards vs cores>shards"
+echo "4. If boost fails, use commercial LRU+TTL as boost-free baseline"
+
+
+
+
+
+
+
+
+
+
+
+
+

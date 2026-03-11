@@ -1,0 +1,232 @@
+# 🔍 TEST BASE ROUTING CORRECTNESS - COPY TO VM
+
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true
+sleep 3
+
+echo "🧪 TESTING BASE ROUTING CORRECTNESS"
+echo "==================================="
+
+# ===== TEST 1: BASE 1.2B SYSCALL VERSION =====
+echo ""
+echo "🔍 TEST 1: Base 1.2B Syscall Version"
+echo "===================================="
+
+# Try to build 1.2B (might need boost::fibers fix)
+if ! g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread meteor_phase1_2b_syscall_reduction.cpp -o meteor_1_2b_test -luring -lboost_fiber -lboost_context -lboost_system 2>/dev/null; then
+    echo "⚠️  Boost::fibers not available, trying without boost..."
+    # Install boost if needed
+    sudo apt update >/dev/null 2>&1
+    sudo apt install -y libboost-fiber-dev libboost-context-dev libboost-system-dev >/dev/null 2>&1
+    
+    g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread meteor_phase1_2b_syscall_reduction.cpp -o meteor_1_2b_test -luring -lboost_fiber -lboost_context -lboost_system
+fi
+
+if [ $? -eq 0 ]; then
+    echo "✅ Base 1.2B built successfully"
+    
+    # Test with cores > shards (routing broken)
+    echo ""
+    echo "Testing 1.2B with 6C:3S (cores > shards, should show routing issues):"
+    ./meteor_1_2b_test -h 127.0.0.1 -p 6379 -c 6 -s 3 -m 1536 &
+    PID_1_2B_BROKEN=$!
+    sleep 5
+    
+    redis-cli -p 6379 flushall >/dev/null
+    
+    # Test single command routing
+    echo "Single command test (6C:3S):"
+    SINGLE_FAILURES_6C3S=0
+    for i in {1..10}; do
+        redis-cli -p 6379 set single_key_$i "single_value_$i" >/dev/null
+        RESULT=$(redis-cli -p 6379 get single_key_$i)
+        if [ "$RESULT" != "single_value_$i" ]; then
+            SINGLE_FAILURES_6C3S=$((SINGLE_FAILURES_6C3S + 1))
+        fi
+    done
+    echo "Single command failures: $SINGLE_FAILURES_6C3S/10"
+    
+    # Test pipeline routing  
+    echo ""
+    echo "Pipeline test (6C:3S):"
+    redis-cli -p 6379 --pipe <<EOF >/dev/null
+SET pipe_key_1 "pipe_value_1"
+SET pipe_key_2 "pipe_value_2"
+SET pipe_key_3 "pipe_value_3"
+EOF
+    
+    PIPELINE_FAILURES_6C3S=0
+    for i in {1..3}; do
+        RESULT=$(redis-cli -p 6379 get pipe_key_$i)
+        if [ "$RESULT" != "pipe_value_$i" ]; then
+            PIPELINE_FAILURES_6C3S=$((PIPELINE_FAILURES_6C3S + 1))
+        fi
+    done
+    echo "Pipeline failures: $PIPELINE_FAILURES_6C3S/3"
+    
+    kill $PID_1_2B_BROKEN && sleep 3
+    
+    # Test with cores = shards (routing fixed)
+    echo ""
+    echo "Testing 1.2B with 6C:6S (cores = shards, should work):"
+    ./meteor_1_2b_test -h 127.0.0.1 -p 6379 -c 6 -s 6 -m 1536 &
+    PID_1_2B_FIXED=$!
+    sleep 5
+    
+    redis-cli -p 6379 flushall >/dev/null
+    
+    # Test single command routing with cores=shards
+    echo "Single command test (6C:6S):"
+    SINGLE_FAILURES_6C6S=0
+    for i in {1..10}; do
+        redis-cli -p 6379 set fixed_single_$i "fixed_value_$i" >/dev/null
+        RESULT=$(redis-cli -p 6379 get fixed_single_$i)
+        if [ "$RESULT" != "fixed_value_$i" ]; then
+            SINGLE_FAILURES_6C6S=$((SINGLE_FAILURES_6C6S + 1))
+        fi
+    done
+    echo "Single command failures: $SINGLE_FAILURES_6C6S/10"
+    
+    # Test pipeline routing with cores=shards
+    echo ""
+    echo "Pipeline test (6C:6S):"
+    redis-cli -p 6379 --pipe <<EOF >/dev/null
+SET fixed_pipe_1 "fixed_pipe_value_1"
+SET fixed_pipe_2 "fixed_pipe_value_2" 
+SET fixed_pipe_3 "fixed_pipe_value_3"
+EOF
+    
+    PIPELINE_FAILURES_6C6S=0
+    for i in {1..3}; do
+        RESULT=$(redis-cli -p 6379 get fixed_pipe_$i)
+        if [ "$RESULT" != "fixed_pipe_value_$i" ]; then
+            PIPELINE_FAILURES_6C6S=$((PIPELINE_FAILURES_6C6S + 1))
+        fi
+    done
+    echo "Pipeline failures: $PIPELINE_FAILURES_6C6S/3"
+    
+    kill $PID_1_2B_FIXED && sleep 3
+    
+else
+    echo "❌ Base 1.2B build failed"
+    SINGLE_FAILURES_6C3S="N/A"
+    PIPELINE_FAILURES_6C3S="N/A"
+    SINGLE_FAILURES_6C6S="N/A"
+    PIPELINE_FAILURES_6C6S="N/A"
+fi
+
+# ===== TEST 2: METEOR BASELINE PRODUCTION =====
+echo ""
+echo "🔍 TEST 2: Meteor Baseline Production"
+echo "====================================="
+
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread meteor_baseline_production.cpp -o meteor_baseline_test -luring 2>/dev/null
+
+if [ $? -eq 0 ]; then
+    echo "✅ Baseline production built successfully"
+    
+    # Test baseline with cores > shards
+    echo ""
+    echo "Testing baseline with 6C:3S:"
+    ./meteor_baseline_test -h 127.0.0.1 -p 6379 -c 6 -s 3 -m 1536 &
+    PID_BASELINE_BROKEN=$!
+    sleep 5
+    
+    redis-cli -p 6379 flushall >/dev/null
+    
+    # Test baseline single command routing
+    BASELINE_SINGLE_FAILURES=0
+    for i in {1..5}; do
+        redis-cli -p 6379 set baseline_single_$i "baseline_value_$i" >/dev/null
+        RESULT=$(redis-cli -p 6379 get baseline_single_$i)
+        if [ "$RESULT" != "baseline_value_$i" ]; then
+            BASELINE_SINGLE_FAILURES=$((BASELINE_SINGLE_FAILURES + 1))
+        fi
+    done
+    echo "Baseline single failures: $BASELINE_SINGLE_FAILURES/5"
+    
+    # Test baseline pipeline routing
+    redis-cli -p 6379 --pipe <<EOF >/dev/null
+SET baseline_pipe_1 "baseline_pipe_1"
+SET baseline_pipe_2 "baseline_pipe_2"
+EOF
+    
+    BASELINE_PIPELINE_FAILURES=0
+    for i in {1..2}; do
+        RESULT=$(redis-cli -p 6379 get baseline_pipe_$i)
+        if [ "$RESULT" != "baseline_pipe_$i" ]; then
+            BASELINE_PIPELINE_FAILURES=$((BASELINE_PIPELINE_FAILURES + 1))
+        fi
+    done
+    echo "Baseline pipeline failures: $BASELINE_PIPELINE_FAILURES/2"
+    
+    kill $PID_BASELINE_BROKEN && sleep 3
+    
+    # Test baseline with cores = shards
+    echo ""
+    echo "Testing baseline with 6C:6S:"
+    ./meteor_baseline_test -h 127.0.0.1 -p 6379 -c 6 -s 6 -m 1536 &
+    PID_BASELINE_FIXED=$!
+    sleep 5
+    
+    redis-cli -p 6379 flushall >/dev/null
+    
+    BASELINE_FIXED_SINGLE=0
+    for i in {1..5}; do
+        redis-cli -p 6379 set baseline_fixed_$i "baseline_fixed_value_$i" >/dev/null
+        RESULT=$(redis-cli -p 6379 get baseline_fixed_$i)
+        if [ "$RESULT" != "baseline_fixed_value_$i" ]; then
+            BASELINE_FIXED_SINGLE=$((BASELINE_FIXED_SINGLE + 1))
+        fi
+    done
+    echo "Baseline fixed single failures: $BASELINE_FIXED_SINGLE/5"
+    
+    kill $PID_BASELINE_FIXED && sleep 3
+    
+else
+    echo "❌ Baseline production build failed"
+    BASELINE_SINGLE_FAILURES="N/A"
+    BASELINE_PIPELINE_FAILURES="N/A"
+    BASELINE_FIXED_SINGLE="N/A"
+fi
+
+# ===== RESULTS SUMMARY =====
+echo ""
+echo "🎯 BASE ROUTING CORRECTNESS RESULTS:"
+echo "===================================="
+echo ""
+echo "Base 1.2B Syscall Version:"
+echo "  6C:3S Single failures: $SINGLE_FAILURES_6C3S/10"
+echo "  6C:3S Pipeline failures: $PIPELINE_FAILURES_6C3S/3"
+echo "  6C:6S Single failures: $SINGLE_FAILURES_6C6S/10"
+echo "  6C:6S Pipeline failures: $PIPELINE_FAILURES_6C6S/3"
+echo ""
+echo "Baseline Production Version:"
+echo "  6C:3S Single failures: $BASELINE_SINGLE_FAILURES/5"
+echo "  6C:3S Pipeline failures: $BASELINE_PIPELINE_FAILURES/2"
+echo "  6C:6S Single failures: $BASELINE_FIXED_SINGLE/5"
+echo ""
+echo "🎯 EXPECTED PATTERN:"
+echo "✅ cores > shards should show failures"
+echo "✅ cores = shards should work perfectly"
+echo ""
+echo "📋 NEXT STEPS:"
+echo "1. If cores=shards fixes it → routing architecture correct"
+echo "2. If cores=shards still fails → need structural routing fix"
+echo "3. Create routing-fixed 1.2B version based on results"
+
+
+
+
+
+
+
+
+
+
+
+
+

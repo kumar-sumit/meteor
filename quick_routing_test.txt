@@ -1,0 +1,88 @@
+# 🚀 QUICK ROUTING TEST - COPY LINE BY LINE
+
+# SSH to VM
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+# Setup
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true && sleep 3
+
+# Install boost
+sudo apt update && sudo apt install -y libboost-fiber-dev libboost-context-dev libboost-system-dev
+
+# Build routing-fixed 1.2B
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread meteor_phase1_2b_routing_fixed.cpp -o meteor_test -luring -lboost_fiber -lboost_context -lboost_system
+
+# Start server (auto-detect will use cores=shards)
+./meteor_test -h 127.0.0.1 -p 6379 -c 6 -s 0 -m 1536 &
+SERVER_PID=$!
+sleep 5
+
+# Test basic connectivity
+redis-cli -p 6379 ping
+
+# Clear data
+redis-cli -p 6379 flushall
+
+# CRITICAL TEST: SET followed by GET
+echo "🧪 Testing SET→GET routing consistency..."
+redis-cli -p 6379 set routing_test_1 "value_1"
+RESULT1=$(redis-cli -p 6379 get routing_test_1)
+echo "SET→GET Test 1: '$RESULT1'"
+
+redis-cli -p 6379 set routing_test_2 "value_2"  
+RESULT2=$(redis-cli -p 6379 get routing_test_2)
+echo "SET→GET Test 2: '$RESULT2'"
+
+redis-cli -p 6379 set routing_test_3 "value_3"
+RESULT3=$(redis-cli -p 6379 get routing_test_3)
+echo "SET→GET Test 3: '$RESULT3'"
+
+# Pipeline test
+echo ""
+echo "🧪 Testing pipeline routing..."
+redis-cli -p 6379 <<EOF
+SET pipe_key_1 "pipe_value_1"
+SET pipe_key_2 "pipe_value_2"
+EOF
+
+PIPE1=$(redis-cli -p 6379 get pipe_key_1)
+PIPE2=$(redis-cli -p 6379 get pipe_key_2)
+echo "Pipeline Test 1: '$PIPE1'"
+echo "Pipeline Test 2: '$PIPE2'"
+
+# Results check
+echo ""
+echo "🎯 RESULTS:"
+if [ "$RESULT1" = "value_1" ] && [ "$RESULT2" = "value_2" ] && [ "$RESULT3" = "value_3" ] && [ "$PIPE1" = "pipe_value_1" ] && [ "$PIPE2" = "pipe_value_2" ]; then
+    echo "🎉 ALL TESTS PASSED!"
+    echo "✅ SET→GET routing working perfectly"
+    echo "✅ Pipeline routing working perfectly"
+    echo "✅ Routing fix successful!"
+else
+    echo "❌ Some tests failed:"
+    echo "Single: '$RESULT1', '$RESULT2', '$RESULT3'"
+    echo "Pipeline: '$PIPE1', '$PIPE2'"
+    echo "→ Routing still has issues"
+fi
+
+# Cleanup
+kill $SERVER_PID
+
+echo ""
+echo "📋 Expected success: All results should match their values"
+echo "📋 If successful, routing-fixed 1.2B ready for TTL addition"
+
+
+
+
+
+
+
+
+
+
+
+
+

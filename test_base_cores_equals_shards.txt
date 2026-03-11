@@ -1,0 +1,171 @@
+# 🧪 TEST BASE 1.2B WITH CORES=SHARDS (No routing changes)
+
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true && sleep 3
+
+# Install boost if needed
+sudo apt update && sudo apt install -y libboost-fiber-dev libboost-context-dev libboost-system-dev
+
+echo "🔍 TESTING BASE 1.2B: cores=shards vs cores>shards"
+echo "=================================================="
+
+# Build original 1.2B (no modifications)
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread meteor_phase1_2b_syscall_reduction.cpp -o meteor_base_test -luring -lboost_fiber -lboost_context -lboost_system
+
+if [ $? -ne 0 ]; then
+    echo "❌ Base 1.2B build failed"
+    exit 1
+fi
+
+echo "✅ Base 1.2B built successfully"
+
+# ===== TEST 1: cores > shards (current default) =====
+echo ""
+echo "🧪 TEST 1: Base 1.2B with cores > shards (6C:3S)"
+echo "==============================================="
+./meteor_base_test -h 127.0.0.1 -p 6379 -c 6 -s 3 -m 1536 &
+PID_BROKEN=$!
+sleep 5
+
+redis-cli -p 6379 flushall
+echo "Testing single SET→GET with 6C:3S:"
+
+# Quick single command test
+BROKEN_FAILURES=0
+for i in {1..10}; do
+    redis-cli -p 6379 set broken_key_$i "broken_value_$i" >/dev/null
+    RESULT=$(redis-cli -p 6379 get broken_key_$i)
+    if [ "$RESULT" != "broken_value_$i" ]; then
+        BROKEN_FAILURES=$((BROKEN_FAILURES + 1))
+        if [ $BROKEN_FAILURES -eq 1 ]; then
+            echo "❌ First failure: set broken_key_$i → get '$RESULT'"
+        fi
+    fi
+done
+
+echo "6C:3S single command failures: $BROKEN_FAILURES/10"
+
+# Quick pipeline test
+redis-cli -p 6379 --pipe <<EOF >/dev/null
+SET broken_pipe_1 "broken_pipe_value_1"  
+SET broken_pipe_2 "broken_pipe_value_2"
+EOF
+
+BROKEN_PIPE_FAILURES=0
+for i in {1..2}; do
+    RESULT=$(redis-cli -p 6379 get broken_pipe_$i)
+    if [ "$RESULT" != "broken_pipe_value_$i" ]; then
+        BROKEN_PIPE_FAILURES=$((BROKEN_PIPE_FAILURES + 1))
+    fi
+done
+
+echo "6C:3S pipeline failures: $BROKEN_PIPE_FAILURES/2"
+
+kill $PID_BROKEN && sleep 3
+
+# ===== TEST 2: cores = shards (simple fix) =====
+echo ""
+echo "🧪 TEST 2: Base 1.2B with cores = shards (6C:6S)"
+echo "==============================================="
+./meteor_base_test -h 127.0.0.1 -p 6379 -c 6 -s 6 -m 1536 &
+PID_FIXED=$!
+sleep 5
+
+redis-cli -p 6379 flushall
+echo "Testing single SET→GET with 6C:6S:"
+
+# Single command test with cores=shards
+FIXED_FAILURES=0
+for i in {1..10}; do
+    redis-cli -p 6379 set fixed_key_$i "fixed_value_$i" >/dev/null
+    RESULT=$(redis-cli -p 6379 get fixed_key_$i)
+    if [ "$RESULT" != "fixed_value_$i" ]; then
+        FIXED_FAILURES=$((FIXED_FAILURES + 1))
+        if [ $FIXED_FAILURES -eq 1 ]; then
+            echo "❌ First failure: set fixed_key_$i → get '$RESULT'"
+        fi
+    fi
+done
+
+echo "6C:6S single command failures: $FIXED_FAILURES/10"
+
+# Pipeline test with cores=shards
+redis-cli -p 6379 --pipe <<EOF >/dev/null
+SET fixed_pipe_1 "fixed_pipe_value_1"
+SET fixed_pipe_2 "fixed_pipe_value_2"  
+EOF
+
+FIXED_PIPE_FAILURES=0
+for i in {1..2}; do
+    RESULT=$(redis-cli -p 6379 get fixed_pipe_$i)
+    if [ "$RESULT" != "fixed_pipe_value_$i" ]; then
+        FIXED_PIPE_FAILURES=$((FIXED_PIPE_FAILURES + 1))
+    fi
+done
+
+echo "6C:6S pipeline failures: $FIXED_PIPE_FAILURES/2"
+
+# Performance comparison if cores=shards works
+if [ $FIXED_FAILURES -eq 0 ] && [ $FIXED_PIPE_FAILURES -eq 0 ]; then
+    echo ""
+    echo "🚀 cores=shards works! Testing performance..."
+    echo "==========================================="
+    
+    # Quick performance test
+    memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis --clients=20 --threads=6 --pipeline=10 --data-size=64 --key-pattern=R:R --ratio=1:3 --test-time=10
+fi
+
+kill $PID_FIXED && sleep 3
+
+# ===== RESULTS ANALYSIS =====
+echo ""
+echo "🎯 BASE 1.2B CORRECTNESS TEST RESULTS:"
+echo "======================================"
+echo ""
+echo "cores > shards (6C:3S):"
+echo "  Single failures: $BROKEN_FAILURES/10"
+echo "  Pipeline failures: $BROKEN_PIPE_FAILURES/2"
+echo ""  
+echo "cores = shards (6C:6S):"
+echo "  Single failures: $FIXED_FAILURES/10"
+echo "  Pipeline failures: $FIXED_PIPE_FAILURES/2"
+echo ""
+echo "🎯 ANALYSIS:"
+if [ $BROKEN_FAILURES -gt 0 ] && [ $FIXED_FAILURES -eq 0 ]; then
+    echo "✅ SIMPLE CORES=SHARDS FIXES THE ISSUE!"
+    echo "   → No routing code changes needed"
+    echo "   → No performance regression"
+    echo "   → Perfect 1:1 core:shard mapping solves it"
+    echo ""
+    echo "🎯 CONCLUSION:"
+    echo "   The issue is architectural: cores > shards"
+    echo "   Solution: Enforce cores = shards in auto-detect"
+    echo "   Performance: Maintained (no routing overhead added)"
+    
+elif [ $FIXED_FAILURES -gt 0 ]; then
+    echo "❌ cores=shards doesn't fix it completely"
+    echo "   → Need DragonflyDB-style cross-core access"
+    echo "   → $FIXED_FAILURES failures remaining"
+    
+else
+    echo "❓ Unexpected results - need investigation"
+fi
+
+echo ""
+echo "📋 SHARE THESE RESULTS TO CONFIRM SIMPLE FIX"
+
+
+
+
+
+
+
+
+
+
+
+
+

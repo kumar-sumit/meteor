@@ -1,0 +1,103 @@
+# 🎯 COPY-PASTE VM COMMANDS: Fix Boost + Test Routing
+
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+# Install boost::fibers
+sudo apt update && sudo apt install -y libboost-fiber-dev libboost-context-dev libboost-system-dev
+
+# Go to meteor directory
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true && sleep 3
+
+# Build Phase 1.2B with boost
+echo "🔧 Building Phase 1.2B with boost::fibers..."
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread meteor_phase1_2b_syscall_reduction.cpp -o meteor_1_2b_boost -luring -lboost_fiber -lboost_context -lboost_system
+
+# Test base routing issue
+echo "🔍 Testing base routing: 4C:2S vs 4C:4S"
+
+# Test 1: cores > shards (broken routing)
+./meteor_1_2b_boost -h 127.0.0.1 -p 6379 -c 4 -s 2 -m 1024 &
+PID1=$!
+sleep 5
+redis-cli -p 6379 set base_test "base_value"
+BASE_4C2S=$(redis-cli -p 6379 get base_test)
+echo "Base 1.2B (4C:2S): '$BASE_4C2S'"
+kill $PID1 && sleep 3
+
+# Test 2: cores = shards (fixed routing)  
+./meteor_1_2b_boost -h 127.0.0.1 -p 6379 -c 4 -s 4 -m 1024 &
+PID2=$!
+sleep 5
+redis-cli -p 6379 set base_test "base_value"
+BASE_4C4S=$(redis-cli -p 6379 get base_test)
+echo "Base 1.2B (4C:4S): '$BASE_4C4S'"
+kill $PID2 && sleep 3
+
+# Build routing-fixed commercial LRU+TTL
+echo ""
+echo "🔧 Building routing-fixed commercial LRU+TTL..."
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread meteor_commercial_lru_ttl_routing_fixed.cpp -o meteor_ttl_fixed -luring
+
+# Test TTL with routing fix
+echo ""
+echo "🎯 CRITICAL TTL TEST (should now work):"
+./meteor_ttl_fixed -h 127.0.0.1 -p 6379 -c 6 -s 0 -m 1536 &
+TTL_PID=$!
+sleep 5
+
+redis-cli -p 6379 flushall
+
+# Test all TTL cases
+redis-cli -p 6379 set no_ttl "value1"
+NO_TTL_GET=$(redis-cli -p 6379 get no_ttl)
+NO_TTL_TTL=$(redis-cli -p 6379 ttl no_ttl)
+
+redis-cli -p 6379 set with_ttl "value2" EX 300
+TTL_GET=$(redis-cli -p 6379 get with_ttl)
+TTL_TTL=$(redis-cli -p 6379 ttl with_ttl)
+
+NONE_TTL=$(redis-cli -p 6379 ttl nonexistent)
+
+echo "TTL RESULTS:"
+echo "No TTL: GET='$NO_TTL_GET', TTL='$NO_TTL_TTL'"
+echo "With TTL: GET='$TTL_GET', TTL='$TTL_TTL'" 
+echo "Nonexistent: TTL='$NONE_TTL'"
+
+# Check if TTL is fixed
+if [ "$NO_TTL_TTL" = "-1" ] && [ "$TTL_TTL" -gt 0 ] && [ "$NONE_TTL" = "-2" ]; then
+    echo ""
+    echo "🎉 SUCCESS: TTL routing issue FIXED!"
+    echo "✅ All TTL tests passing with cores=shards"
+    
+    # Quick benchmark
+    echo ""
+    echo "🚀 Performance test with fixed TTL:"
+    memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis --clients=30 --threads=6 --pipeline=10 --data-size=64 --key-pattern=R:R --ratio=1:3 --test-time=15
+    
+else
+    echo ""
+    echo "❌ TTL still broken - need further investigation"
+fi
+
+kill $TTL_PID 2>/dev/null
+
+echo ""
+echo "🎯 SHARE RESULTS:"
+echo "Base 4C:2S: '$BASE_4C2S'"
+echo "Base 4C:4S: '$BASE_4C4S'"  
+echo "TTL Results: no_ttl='$NO_TTL_TTL', with_ttl='$TTL_TTL', none='$NONE_TTL'"
+
+
+
+
+
+
+
+
+
+
+
+
+

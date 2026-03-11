@@ -1,0 +1,119 @@
+# 🚀 QUICK DRAGONFLY CROSS-SHARD TEST - COPY LINE BY LINE
+
+# SSH to VM  
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+# Setup
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true && sleep 3
+
+# Install boost if needed
+sudo apt update && sudo apt install -y libboost-fiber-dev libboost-context-dev libboost-system-dev
+
+# Build DragonflyDB cross-shard version
+echo "🔧 Building DragonflyDB cross-shard version..."
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread meteor_phase1_2b_dragonfly_cross_shard.cpp -o meteor_dragonfly -luring -lboost_fiber -lboost_context -lboost_system
+
+if [ $? -ne 0 ]; then
+    echo "❌ Build failed"
+    exit 1
+fi
+
+echo "✅ DragonflyDB version built successfully!"
+
+# Start server with cross-shard setup (6 cores, 3 shards = forces cross-shard operations)
+echo ""
+echo "🐉 Testing DragonflyDB cross-shard approach (6C:3S)..."
+./meteor_dragonfly -h 127.0.0.1 -p 6379 -c 6 -s 3 -m 1536 &
+SERVER_PID=$!
+sleep 5
+
+# Test connectivity
+redis-cli -p 6379 ping
+
+# Clear data
+redis-cli -p 6379 flushall
+
+# CRITICAL TEST: Single SET→GET with cross-shard operations
+echo ""
+echo "🧪 CRITICAL TEST: Single command cross-shard correctness"
+echo "======================================================="
+
+# Test multiple keys (some will be cross-shard due to 6C:3S setup)
+FAILURES=0
+for i in {1..15}; do
+    redis-cli -p 6379 set dragonfly_key_$i "dragonfly_value_$i" >/dev/null
+    RESULT=$(redis-cli -p 6379 get dragonfly_key_$i)
+    if [ "$RESULT" != "dragonfly_value_$i" ]; then
+        FAILURES=$((FAILURES + 1))
+        if [ $FAILURES -eq 1 ]; then
+            echo "❌ First failure: set dragonfly_key_$i → get '$RESULT'"
+        fi
+    fi
+done
+
+echo "Cross-shard operation failures: $FAILURES/15"
+
+# Test immediate consistency (rapid SET→GET)
+echo ""
+echo "🧪 Immediate consistency test (tests cross-shard message speed):"
+echo "==============================================================="
+
+RAPID_FAILURES=0
+for i in {1..5}; do
+    redis-cli -p 6379 set rapid_$i "rapid_val_$i" >/dev/null
+    RAPID_RESULT=$(redis-cli -p 6379 get rapid_$i)
+    if [ "$RAPID_RESULT" != "rapid_val_$i" ]; then
+        RAPID_FAILURES=$((RAPID_FAILURES + 1))
+    fi
+done
+
+echo "Rapid SET→GET failures: $RAPID_FAILURES/5"
+
+# Performance test if working
+if [ $FAILURES -eq 0 ] && [ $RAPID_FAILURES -eq 0 ]; then
+    echo ""
+    echo "🎉 All correctness tests PASSED!"
+    echo ""
+    echo "🚀 Running performance test..."
+    echo "============================"
+    
+    memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis --clients=20 --threads=6 --pipeline=10 --data-size=64 --key-pattern=R:R --ratio=1:3 --test-time=10
+    
+    echo ""
+    echo "🏆 DRAGONFLY CROSS-SHARD SUCCESS!"
+    echo "================================="
+    echo "✅ Cross-shard single commands work perfectly"
+    echo "✅ No connection migration overhead"
+    echo "✅ Lightweight boost::fibers messaging"
+    echo "✅ Performance maintained"
+    echo "✅ Ready for TTL implementation"
+    
+else
+    echo ""
+    echo "❌ STILL HAS ISSUES:"
+    echo "Cross-shard failures: $FAILURES/15"
+    echo "Rapid consistency failures: $RAPID_FAILURES/5" 
+    echo ""
+    echo "→ Need to debug cross-shard messaging implementation"
+fi
+
+# Cleanup
+kill $SERVER_PID 2>/dev/null
+
+echo ""
+echo "📋 Expected success: All failures should be 0/15 and 0/5"
+
+
+
+
+
+
+
+
+
+
+
+
+

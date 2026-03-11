@@ -1,0 +1,14 @@
+cd /mnt/externalDisk/meteor && g++ -std=c++17 -O0 -DHAS_LINUX_EPOLL meteor_dragonfly_COMPILED.cpp -o test_build -luring -lboost_fiber -lboost_context -lboost_system -pthread && echo "BUILD SUCCESS" && ./test_build -c 2 -s 2 -m 512 &
+
+
+
+
+
+
+
+
+
+
+
+
+

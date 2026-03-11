@@ -1,0 +1,43 @@
+🧪 **SEGFAULT FIX DEPLOYMENT & TESTING PROTOCOL**
+
+## **BUILD & DEPLOY RACE CONDITION FIX**:
+
+```bash
+# Upload race condition fix
+gcloud compute scp cpp/meteor_race_condition_fix.cpp memtier-benchmarking:/dev/shm/ \
+  --zone "asia-southeast1-a" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+# Build race condition fix  
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" \
+  --tunnel-through-iap --project "<your-gcp-project-id>" -- \
+  'cd /dev/shm && export TMPDIR=/dev/shm && g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -pthread -mavx512f -mavx512dq -mavx2 -mavx -msse4.2 -msse4.1 -mfma -o meteor_race_fix meteor_race_condition_fix.cpp -lboost_fiber -lboost_context -lboost_system -luring'
+
+# Deploy to target VM
+gcloud compute scp --zone "asia-southeast1-a" memtier-benchmarking:/dev/shm/meteor_race_fix /tmp/ \
+  --tunnel-through-iap --project "<your-gcp-project-id>"
+gcloud compute scp /tmp/meteor_race_fix mcache-lssd-sumit:/dev/shm/ \
+  --zone "asia-southeast1-a" --tunnel-through-iap --project "<your-gcp-project-id>"
+```
+
+## **CRITICAL SEGFAULT TEST**:
+
+```bash
+# Test the EXACT failing scenario
+cd /dev/shm
+chmod +x meteor_race_fix
+./meteor_race_fix -c 4 -s 4 &
+
+# Run the original crashing test
+./memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis \
+  --clients=30 --threads=8 --pipeline=1 --data-size=64 \
+  --key-pattern=R:R --ratio=1:1 --requests=50000 \
+  --hide-histogram
+```
+
+## **EXPECTED RESULTS**:
+- ✅ **NO SEGFAULT**: Server should remain stable throughout test
+- ✅ **"Pipeline=1 detected, disabling work-stealing"** message  
+- ✅ **Successful completion** of all 50,000 requests
+- ✅ **No thread safety issues**: Clean operation completion
+
+**This fix directly addresses the root cause identified from debug analysis!** 🎯

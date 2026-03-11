@@ -1,0 +1,74 @@
+# DIRECT PROCESSING FIX for Timeout Regression
+# 
+# PROBLEM: Commands getting stuck in fiber processing pipeline
+# SOLUTION: Bypass fiber processing for single commands, use direct processing like baseline
+# 
+# This creates a hybrid approach:
+# - Single commands: Direct processing (fast, reliable, like baseline)
+# - Pipeline commands: Fiber processing (for cross-core correctness)
+
+--- a/cpp/sharded_server_phase8_step25_io_uring_boost_fiber_integrated.cpp
++++ b/cpp/sharded_server_phase8_step25_io_uring_boost_fiber_integrated.cpp
+
+@@ -863,20 +863,30 @@ class BoostFiberIntegratedTemporalServer {
+         } else {
+             // **SINGLE COMMAND**: Direct processing
+             for (const auto& cmd_data : commands) {
+                 auto parsed_cmd = parse_single_resp_command(cmd_data);
+                 if (!parsed_cmd.empty()) {
+                     std::string command = parsed_cmd[0];
+                     std::string key = parsed_cmd.size() > 1 ? parsed_cmd[1] : "";
+                     std::string value = parsed_cmd.size() > 2 ? parsed_cmd[2] : "";
+                     
+-                    BoostFiberTemporalCommand temporal_cmd(command, key, value, 0, 0, core_id_, core_id_, client_fd);
+-                    std::string response = execute_single_command_direct(temporal_cmd);
++                    // **REGRESSION FIX**: Use direct processing instead of fiber promises
++                    // This avoids the timeout issues in fiber processing pipeline
++                    std::string response = execute_command_direct_simple(command, key, value);
+                     
+                     if (!response.empty()) {
+-                        send_response_async(client_fd, response);
++                        // **FAST SEND**: Direct socket send (like baseline)
++                        send(client_fd, response.c_str(), response.length(), MSG_NOSIGNAL);
+                     }
+                 }
+             }
+         }
+     }
+
++    // **NEW**: Simple direct command execution (like baseline server)
++    std::string execute_command_direct_simple(const std::string& command, const std::string& key, const std::string& value) const {
++        std::string cmd_upper = command;
++        std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
++        
++        if (cmd_upper == "SET") {
++            return cache_->set(key, value) ? "+OK\r\n" : "-ERR SET failed\r\n";
++        } else if (cmd_upper == "GET") {
++            auto result = cache_->get(key);
++            if (result) {
++                return "$" + std::to_string(result->length()) + "\r\n" + *result + "\r\n";
++            } else {
++                return "$-1\r\n";
++            }
++        } else if (cmd_upper == "DEL") {
++            return cache_->del(key) ? ":1\r\n" : ":0\r\n";
++        } else if (cmd_upper == "PING") {
++            return "+PONG\r\n";
++        }
++        
++        return "-ERR unknown command '" + command + "'\r\n";
++    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+

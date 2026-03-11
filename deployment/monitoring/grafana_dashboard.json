@@ -1,0 +1,90 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Meteor Server - Production Monitoring",
+    "tags": ["meteor", "redis", "performance"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Operations Per Second",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(meteor_commands_total[1m])",
+            "legendFormat": "Commands/sec"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Operations/sec"
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Cache Hit Rate",
+        "type": "singlestat",
+        "targets": [
+          {
+            "expr": "meteor_cache_hits_total / (meteor_cache_hits_total + meteor_cache_misses_total) * 100",
+            "legendFormat": "Hit Rate %"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Memory Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "meteor_memory_usage_bytes",
+            "legendFormat": "Memory Usage"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Connected Clients",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "meteor_connected_clients",
+            "legendFormat": "Active Connections"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Response Time Distribution",
+        "type": "heatmap",
+        "targets": [
+          {
+            "expr": "rate(meteor_request_duration_histogram_bucket[5m])",
+            "legendFormat": "{{le}}"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "System Resources",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "cpu_usage_active",
+            "legendFormat": "CPU Usage %"
+          },
+          {
+            "expr": "mem_used_percent",
+            "legendFormat": "Memory %"
+          }
+        ]
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "5s"
+  }
+}

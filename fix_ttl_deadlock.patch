@@ -1,0 +1,66 @@
+# **CRITICAL FIX: TTL Command Deadlock Issue**
+# 
+# Problem: TTL command hanging due to race conditions and missing locks
+# Root Cause: Methods accessing data_ without proper synchronization
+
+--- meteor_commercial_lru_ttl.cpp.original
++++ meteor_commercial_lru_ttl.cpp.fixed
+
+@@ -1576,12 +1576,21 @@ namespace storage {
+         bool lazy_expire_if_needed(const std::string& key) {
+-            auto it = data_.find(key);
+-            if (it != data_.end() && it->second.is_expired()) {
+-                update_memory_usage(key, it->second, false);
+-                data_.erase(it);
+-                return true; // Was expired and removed
++            std::shared_lock<std::shared_mutex> lock(mutex_);
++            
++            auto it = data_.find(key);
++            if (it != data_.end()) {
++                if (it->second.is_expired()) {
++                    // Need to upgrade to write lock
++                    lock.unlock();
++                    std::unique_lock<std::shared_mutex> write_lock(mutex_);
++                    
++                    // Double-check after acquiring write lock
++                    it = data_.find(key);
++                    if (it != data_.end() && it->second.is_expired()) {
++                        update_memory_usage(key, it->second, false);
++                        data_.erase(it);
++                        return true; // Was expired and removed
++                    }
++                }
+             }
+             return false; // Not expired
+         }
+
+@@ -1815,18 +1824,23 @@ namespace storage {
+         long ttl(const std::string& key) {
+-            if (lazy_expire_if_needed(key)) {
+-                return -2; // Key doesn't exist
+-            }
++            // First check and expire if needed (with proper locking)
++            lazy_expire_if_needed(key);
+             
++            // Now get TTL with shared lock
++            std::shared_lock<std::shared_mutex> lock(mutex_);
+             auto it = data_.find(key);
++            
++            if (it == data_.end()) {
++                return -2; // Key doesn't exist
++            }
++            
+             if (it != data_.end()) {
+                 if (it->second.has_ttl) {
+                     auto remaining = it->second.expiry_time - std::chrono::steady_clock::now();
+-                    if (remaining.count() > 0) {
+-                        return std::chrono::duration_cast<std::chrono::seconds>(remaining).count();
+-                    } else {
++                    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(remaining).count();
++                    if (seconds <= 0) {
+                         return -2; // Expired
++                    } else {
++                        return seconds;
+                     }
+                 }
+                 return -1; // No TTL set

@@ -1,0 +1,220 @@
+# 🚀 TEST EARLY ROUTING OPTIMIZATION - COPY TO VM
+
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true && sleep 3
+
+# Build early routing version
+echo "🔧 Building early routing optimized version..."
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread meteor_commercial_early_routing.cpp -o meteor_early_routing -luring
+
+if [ $? -ne 0 ]; then
+    echo "❌ Build failed"
+    exit 1
+fi
+
+echo "✅ Early routing version built successfully!"
+
+# ===== TEST 1: SINGLE COMMAND ROUTING =====
+echo ""
+echo "🧪 TEST 1: Single Command Routing (cores=shards)"
+echo "==============================================="
+
+# Start with perfect routing (6C:6S)
+./meteor_early_routing -h 127.0.0.1 -p 6379 -c 6 -s 6 -m 1536 &
+SERVER_PID=$!
+sleep 5
+
+if redis-cli -p 6379 ping >/dev/null 2>&1; then
+    echo "✅ Server responding (6C:6S perfect routing)"
+    
+    redis-cli -p 6379 flushall
+    
+    echo ""
+    echo "Testing single command routing consistency:"
+    echo "=========================================="
+    
+    # Test multiple keys to verify routing consistency
+    SINGLE_FAILURES=0
+    for i in {1..10}; do
+        KEY="single_key_$i"
+        VALUE="single_value_$i"
+        
+        # Test GET/SET routing
+        redis-cli -p 6379 set $KEY $VALUE >/dev/null
+        GET_RESULT=$(redis-cli -p 6379 get $KEY)
+        
+        if [ "$GET_RESULT" = "$VALUE" ]; then
+            echo "✅ $KEY: SET→GET consistent routing"
+        else
+            echo "❌ $KEY: SET→GET routing failed!"
+            SINGLE_FAILURES=$((SINGLE_FAILURES + 1))
+        fi
+        
+        # Test TTL routing on same key
+        TTL_RESULT=$(redis-cli -p 6379 ttl $KEY)
+        if [ "$TTL_RESULT" = "-1" ]; then
+            echo "✅ $KEY: TTL correctly routed (-1 for no TTL)"
+        else
+            echo "❌ $KEY: TTL routing failed (got $TTL_RESULT, expected -1)"
+            SINGLE_FAILURES=$((SINGLE_FAILURES + 1))
+        fi
+    done
+    
+    echo ""
+    echo "Single command routing failures: $SINGLE_FAILURES/20"
+    
+else
+    echo "❌ Server not responding"
+    exit 1
+fi
+
+# ===== TEST 2: PIPELINE COMMAND ROUTING =====
+echo ""
+echo "🧪 TEST 2: Pipeline Command Routing"
+echo "=================================="
+
+redis-cli -p 6379 flushall
+
+# Create pipeline with multiple commands
+redis-cli -p 6379 <<EOF
+MULTI
+SET pipeline_key_1 "pipeline_value_1"
+SET pipeline_key_2 "pipeline_value_2" 
+SET pipeline_key_3 "pipeline_value_3"
+EXEC
+EOF
+
+# Test pipeline GET consistency
+echo ""
+echo "Testing pipeline routing consistency:"
+echo "===================================="
+
+PIPELINE_FAILURES=0
+for i in {1..3}; do
+    KEY="pipeline_key_$i"
+    EXPECTED="pipeline_value_$i"
+    
+    GET_RESULT=$(redis-cli -p 6379 get $KEY)
+    TTL_RESULT=$(redis-cli -p 6379 ttl $KEY)
+    
+    if [ "$GET_RESULT" = "$EXPECTED" ]; then
+        echo "✅ $KEY: Pipeline GET consistent"
+    else
+        echo "❌ $KEY: Pipeline GET failed (got '$GET_RESULT', expected '$EXPECTED')"
+        PIPELINE_FAILURES=$((PIPELINE_FAILURES + 1))
+    fi
+    
+    if [ "$TTL_RESULT" = "-1" ]; then
+        echo "✅ $KEY: Pipeline TTL consistent"
+    else
+        echo "❌ $KEY: Pipeline TTL failed (got $TTL_RESULT, expected -1)"
+        PIPELINE_FAILURES=$((PIPELINE_FAILURES + 1))
+    fi
+done
+
+echo ""
+echo "Pipeline routing failures: $PIPELINE_FAILURES/6"
+
+# ===== TEST 3: TTL FUNCTIONALITY =====
+echo ""
+echo "🧪 TEST 3: Complete TTL Functionality"  
+echo "==================================="
+
+# Test all TTL scenarios with perfect routing
+redis-cli -p 6379 flushall
+
+# Test 1: Key without TTL
+redis-cli -p 6379 set no_ttl_test "no_ttl_value"
+NO_TTL_GET=$(redis-cli -p 6379 get no_ttl_test)
+NO_TTL_TTL=$(redis-cli -p 6379 ttl no_ttl_test)
+echo "No TTL: GET='$NO_TTL_GET', TTL='$NO_TTL_TTL'"
+
+# Test 2: Key with TTL
+redis-cli -p 6379 set ttl_test "ttl_value" EX 300
+TTL_GET=$(redis-cli -p 6379 get ttl_test) 
+TTL_TTL=$(redis-cli -p 6379 ttl ttl_test)
+echo "With TTL: GET='$TTL_GET', TTL='$TTL_TTL'"
+
+# Test 3: EXPIRE command
+redis-cli -p 6379 set expire_test "expire_value"
+redis-cli -p 6379 expire expire_test 600
+EXPIRE_GET=$(redis-cli -p 6379 get expire_test)
+EXPIRE_TTL=$(redis-cli -p 6379 ttl expire_test)
+echo "EXPIRE: GET='$EXPIRE_GET', TTL='$EXPIRE_TTL'"
+
+# Test 4: Nonexistent key
+NONE_TTL=$(redis-cli -p 6379 ttl nonexistent_key)
+echo "Nonexistent: TTL='$NONE_TTL'"
+
+# ===== FINAL RESULTS =====
+echo ""
+echo "🎯 EARLY ROUTING TEST RESULTS:"
+echo "============================="
+echo "Single command failures: $SINGLE_FAILURES/20"
+echo "Pipeline failures: $PIPELINE_FAILURES/6"
+echo ""
+echo "TTL Results:"
+echo "No TTL: GET='$NO_TTL_GET', TTL='$NO_TTL_TTL' (expected: value, -1)"
+echo "With TTL: GET='$TTL_GET', TTL='$TTL_TTL' (expected: value, >0)"
+echo "EXPIRE: GET='$EXPIRE_GET', TTL='$EXPIRE_TTL' (expected: value, >0)"
+echo "Nonexistent: TTL='$NONE_TTL' (expected: -2)"
+
+# Success calculation
+TOTAL_FAILURES=$((SINGLE_FAILURES + PIPELINE_FAILURES))
+TTL_SUCCESS=true
+
+if [ "$NO_TTL_GET" != "no_ttl_value" ] || [ "$NO_TTL_TTL" != "-1" ]; then
+    TTL_SUCCESS=false
+fi
+
+if [ "$TTL_GET" != "ttl_value" ] || [ "$TTL_TTL" -le 0 ]; then
+    TTL_SUCCESS=false
+fi
+
+if [ "$EXPIRE_GET" != "expire_value" ] || [ "$EXPIRE_TTL" -le 0 ]; then
+    TTL_SUCCESS=false
+fi
+
+if [ "$NONE_TTL" != "-2" ]; then
+    TTL_SUCCESS=false
+fi
+
+echo ""
+if [ $TOTAL_FAILURES -eq 0 ] && [ "$TTL_SUCCESS" = true ]; then
+    echo "🎉 COMPLETE SUCCESS!"
+    echo "✅ Early routing working perfectly"
+    echo "✅ Single commands routed correctly"
+    echo "✅ Pipeline commands routed correctly" 
+    echo "✅ All TTL scenarios working"
+    echo ""
+    echo "🚀 Performance optimization achieved:"
+    echo "   → Key hash computed FIRST"
+    echo "   → Immediate routing (no late migration)"
+    echo "   → Perfect cores=shards consistency"
+else
+    echo "❌ Some tests failed:"
+    echo "   Routing failures: $TOTAL_FAILURES"
+    echo "   TTL success: $TTL_SUCCESS"
+fi
+
+# Cleanup
+kill $SERVER_PID 2>/dev/null
+
+echo ""
+echo "🏁 Early routing test complete"
+
+
+
+
+
+
+
+
+
+
+
+
+

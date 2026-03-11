@@ -1,0 +1,140 @@
+# 🔧 FIX BOOST::FIBERS COMPILATION ERROR
+
+# ===== SSH TO VM =====
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+# ===== SOLUTION 1: Install Boost::Fibers Library =====
+echo "🔧 Installing Boost::Fibers library..."
+
+# Update package list
+sudo apt update
+
+# Install boost development libraries (includes boost::fibers)
+sudo apt install -y libboost-fiber-dev libboost-all-dev
+
+echo "✅ Boost::Fibers installed"
+
+# ===== SOLUTION 2: Build with Proper Linker Flags =====
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true
+sleep 3
+
+echo "🔧 Building Phase 1.2B with boost::fibers..."
+
+# Build with boost::fibers library
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread \
+    -o meteor_1_2b_fixed meteor_phase1_2b_syscall_reduction.cpp \
+    -luring -lboost_fiber -lboost_context -lboost_system
+
+if [ $? -eq 0 ]; then
+    echo "✅ Phase 1.2B built successfully with boost::fibers!"
+    
+    # Quick test
+    ./meteor_1_2b_fixed -h 127.0.0.1 -p 6379 -c 1 -s 1 -m 512 &
+    TEST_PID=$!
+    sleep 4
+    
+    if redis-cli -p 6379 ping >/dev/null 2>&1; then
+        echo "✅ Phase 1.2B server responding!"
+        redis-cli -p 6379 set boost_test "works"
+        BOOST_RESULT=$(redis-cli -p 6379 get boost_test)
+        echo "Boost test: GET -> '$BOOST_RESULT'"
+        
+        if [ "$BOOST_RESULT" = "works" ]; then
+            echo "🎉 Phase 1.2B with boost::fibers working perfectly!"
+        fi
+    else
+        echo "❌ Server not responding"
+    fi
+    
+    kill $TEST_PID 2>/dev/null
+else
+    echo "❌ Build failed - trying boost-free version..."
+fi
+
+# ===== SOLUTION 3: Test Base Routing Issue =====
+echo ""
+echo "🔍 Testing base routing issue (cores vs shards)"
+echo "=============================================="
+
+# Test routing with cores != shards (should fail)
+echo "Testing 4C:2S (cores > shards - should show routing failures):"
+./meteor_1_2b_fixed -h 127.0.0.1 -p 6379 -c 4 -s 2 -m 1024 &
+ROUTING_PID=$!
+sleep 5
+
+redis-cli -p 6379 flushall
+
+ROUTING_FAILURES=0
+for i in {1..5}; do
+    redis-cli -p 6379 set route_key_$i "route_value_$i" >/dev/null
+    ROUTE_RESULT=$(redis-cli -p 6379 get route_key_$i)
+    
+    if [ "$ROUTE_RESULT" = "route_value_$i" ]; then
+        echo "✅ route_key_$i: Consistent"
+    else
+        echo "❌ route_key_$i: SET worked, GET failed (routing issue!)"
+        ROUTING_FAILURES=$((ROUTING_FAILURES + 1))
+    fi
+done
+
+echo "Routing failures with 4C:2S: $ROUTING_FAILURES/5"
+
+kill $ROUTING_PID 2>/dev/null || true
+sleep 3
+
+# Test with cores = shards (should work)
+echo ""
+echo "Testing 4C:4S (cores = shards - should work):"
+./meteor_1_2b_fixed -h 127.0.0.1 -p 6379 -c 4 -s 4 -m 1024 &
+PERFECT_PID=$!
+sleep 5
+
+redis-cli -p 6379 flushall
+
+PERFECT_FAILURES=0
+for i in {1..5}; do
+    redis-cli -p 6379 set perfect_key_$i "perfect_value_$i" >/dev/null
+    PERFECT_RESULT=$(redis-cli -p 6379 get perfect_key_$i)
+    
+    if [ "$PERFECT_RESULT" = "perfect_value_$i" ]; then
+        echo "✅ perfect_key_$i: Perfect routing"
+    else
+        echo "❌ perfect_key_$i: Still broken!"
+        PERFECT_FAILURES=$((PERFECT_FAILURES + 1))
+    fi
+done
+
+echo "Routing failures with 4C:4S: $PERFECT_FAILURES/5"
+
+kill $PERFECT_PID 2>/dev/null
+
+# ===== RESULTS =====
+echo ""
+echo "🏆 ROUTING DIAGNOSIS COMPLETE"
+echo "============================"
+echo "cores > shards failures: $ROUTING_FAILURES/5"
+echo "cores = shards failures: $PERFECT_FAILURES/5"
+
+if [ $ROUTING_FAILURES -gt 0 ] && [ $PERFECT_FAILURES -eq 0 ]; then
+    echo "✅ SOLUTION CONFIRMED: cores=shards fixes routing!"
+    echo "   → Apply this to commercial LRU+TTL version"
+elif [ $ROUTING_FAILURES -gt 0 ] && [ $PERFECT_FAILURES -gt 0 ]; then
+    echo "❌ cores=shards doesn't fix it - deeper issue"
+else
+    echo "✅ No routing issues found"
+fi
+
+
+
+
+
+
+
+
+
+
+
+
+

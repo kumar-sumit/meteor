@@ -1,0 +1,23 @@
+╔══════════════════════════════════════════════════════════════════════════╗
+║      Build & Test Meteor Package on mcache-lssd-sumit VM                ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+📤 Step 1: Transferring source files to VM...
+  Transferring: cpp/meteor_redis_client_compatible_with_persistence.cpp
+  Transferring: cpp/meteor_persistence_module.hpp
+  Transferring: create_meteor_package.sh
+  Transferring: deployment/scripts/deploy_meteor.sh
+  Transferring: deployment/systemd/meteor.service
+  Transferring: deployment/config/production.conf
+  Transferring: deployment/monitoring
+✅ Source files transferred
+
+🔧 Step 2: Building package on VM...
+External IP address was not found; defaulting to using IAP tunneling.
+WARNING: 
+
+To increase the performance of the tunnel, consider installing NumPy. For instructions,
+please see https://cloud.google.com/iap/docs/using-tcp-forwarding#increasing_the_tcp_upload_bandwidth
+
+📦 Preparing build environment...
+bash: line 5: cd: /tmp/meteor-build: No such file or directory

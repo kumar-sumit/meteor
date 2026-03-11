@@ -1,0 +1,177 @@
+# 🎯 FINAL TTL ROUTING FIX TEST
+
+# ===== SSH TO VM =====
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project="<your-gcp-project-id>"
+
+# ===== BUILD FINAL ROUTING FIX =====
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true
+sleep 3
+
+echo "🔧 Building FINAL routing fix (TTL single command path corrected)..."
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread \
+    meteor_commercial_lru_ttl_routing_final.cpp \
+    -o meteor_ttl_final_fix \
+    -luring
+
+if [ $? -eq 0 ]; then
+    echo "✅ Final TTL routing fix built successfully!"
+    
+    # ===== CRITICAL TTL TEST =====
+    echo ""
+    echo "🎯 FINAL TTL TEST (should now work completely):"
+    echo "=============================================="
+    
+    # Start with cores=shards for perfect routing
+    ./meteor_ttl_final_fix -h 127.0.0.1 -p 6379 -c 6 -s 6 -m 1536 &
+    FINAL_PID=$!
+    sleep 5
+    
+    if redis-cli -p 6379 ping >/dev/null 2>&1; then
+        echo "✅ Server responding"
+        
+        redis-cli -p 6379 flushall
+        
+        # Test all TTL scenarios
+        echo ""
+        echo "Testing all TTL scenarios:"
+        echo "=========================="
+        
+        # Scenario 1: Key without TTL
+        redis-cli -p 6379 set key_no_ttl "value_no_ttl"
+        NO_TTL_GET=$(redis-cli -p 6379 get key_no_ttl)
+        NO_TTL_TTL=$(redis-cli -p 6379 ttl key_no_ttl)
+        
+        echo "1. Key without TTL:"
+        echo "   GET key_no_ttl -> '$NO_TTL_GET'"
+        echo "   TTL key_no_ttl -> $NO_TTL_TTL"
+        
+        # Scenario 2: Key with TTL (SET EX)
+        redis-cli -p 6379 set key_with_ttl "value_with_ttl" EX 180
+        WITH_TTL_GET=$(redis-cli -p 6379 get key_with_ttl)
+        WITH_TTL_TTL=$(redis-cli -p 6379 ttl key_with_ttl)
+        
+        echo ""
+        echo "2. Key with TTL (SET EX):"
+        echo "   GET key_with_ttl -> '$WITH_TTL_GET'"
+        echo "   TTL key_with_ttl -> $WITH_TTL_TTL"
+        
+        # Scenario 3: EXPIRE command
+        redis-cli -p 6379 set key_for_expire "value_for_expire"
+        redis-cli -p 6379 expire key_for_expire 240
+        EXPIRE_GET=$(redis-cli -p 6379 get key_for_expire)
+        EXPIRE_TTL=$(redis-cli -p 6379 ttl key_for_expire)
+        
+        echo ""
+        echo "3. Key with EXPIRE command:"
+        echo "   GET key_for_expire -> '$EXPIRE_GET'"
+        echo "   TTL key_for_expire -> $EXPIRE_TTL"
+        
+        # Scenario 4: Nonexistent key
+        NONEXIST_TTL=$(redis-cli -p 6379 ttl nonexistent_key)
+        
+        echo ""
+        echo "4. Nonexistent key:"
+        echo "   TTL nonexistent_key -> $NONEXIST_TTL"
+        
+        # ===== RESULTS ANALYSIS =====
+        echo ""
+        echo "🏆 FINAL TTL ROUTING FIX RESULTS:"
+        echo "================================="
+        
+        TESTS_PASSED=0
+        TOTAL_TESTS=4
+        
+        # Test 1: Key without TTL should return -1
+        if [ "$NO_TTL_GET" = "value_no_ttl" ] && [ "$NO_TTL_TTL" = "-1" ]; then
+            echo "✅ Test 1 PASSED: Key without TTL returns -1"
+            TESTS_PASSED=$((TESTS_PASSED + 1))
+        else
+            echo "❌ Test 1 FAILED: Expected GET='value_no_ttl', TTL='-1'"
+            echo "   Got: GET='$NO_TTL_GET', TTL='$NO_TTL_TTL'"
+        fi
+        
+        # Test 2: Key with SET EX should return >0
+        if [ "$WITH_TTL_GET" = "value_with_ttl" ] && [ "$WITH_TTL_TTL" -gt 0 ] && [ "$WITH_TTL_TTL" -le 180 ]; then
+            echo "✅ Test 2 PASSED: Key with SET EX returns >0"
+            TESTS_PASSED=$((TESTS_PASSED + 1))
+        else
+            echo "❌ Test 2 FAILED: Expected GET='value_with_ttl', TTL>0"
+            echo "   Got: GET='$WITH_TTL_GET', TTL='$WITH_TTL_TTL'"
+        fi
+        
+        # Test 3: EXPIRE command should work
+        if [ "$EXPIRE_GET" = "value_for_expire" ] && [ "$EXPIRE_TTL" -gt 0 ] && [ "$EXPIRE_TTL" -le 240 ]; then
+            echo "✅ Test 3 PASSED: EXPIRE command works correctly"
+            TESTS_PASSED=$((TESTS_PASSED + 1))
+        else
+            echo "❌ Test 3 FAILED: Expected GET='value_for_expire', TTL>0"
+            echo "   Got: GET='$EXPIRE_GET', TTL='$EXPIRE_TTL'"
+        fi
+        
+        # Test 4: Nonexistent key should return -2
+        if [ "$NONEXIST_TTL" = "-2" ]; then
+            echo "✅ Test 4 PASSED: Nonexistent key returns -2"
+            TESTS_PASSED=$((TESTS_PASSED + 1))
+        else
+            echo "❌ Test 4 FAILED: Expected TTL='-2'"
+            echo "   Got: TTL='$NONEXIST_TTL'"
+        fi
+        
+        # ===== FINAL VERDICT =====
+        echo ""
+        echo "🎯 FINAL VERDICT: $TESTS_PASSED/$TOTAL_TESTS tests passed"
+        echo "==============================="
+        
+        if [ $TESTS_PASSED -eq $TOTAL_TESTS ]; then
+            echo ""
+            echo "🎉 SUCCESS! TTL ROUTING COMPLETELY FIXED!"
+            echo "==========================================="
+            echo "✅ All TTL scenarios working correctly"
+            echo "✅ GET and TTL now use consistent routing"  
+            echo "✅ Single command path routing implemented"
+            echo "✅ Commercial LRU+TTL server ready for production"
+            echo ""
+            echo "🚀 Running final performance benchmark..."
+            echo "========================================"
+            
+            # Final performance test
+            memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis --clients=30 --threads=6 --pipeline=10 --data-size=64 --key-pattern=R:R --ratio=1:3 --test-time=20
+            
+        else
+            echo ""
+            echo "❌ TTL routing still has issues - $((TOTAL_TESTS - TESTS_PASSED)) tests failing"
+            echo "Need further investigation of TTL implementation"
+        fi
+        
+    else
+        echo "❌ Final server not responding"
+    fi
+    
+    kill $FINAL_PID 2>/dev/null
+else
+    echo "❌ Final build failed"
+fi
+
+echo ""
+echo "📋 SHARE FINAL RESULTS:"
+echo "======================"
+echo "No TTL: GET='$NO_TTL_GET', TTL='$NO_TTL_TTL'"
+echo "With TTL: GET='$WITH_TTL_GET', TTL='$WITH_TTL_TTL'"
+echo "EXPIRE: GET='$EXPIRE_GET', TTL='$EXPIRE_TTL'"  
+echo "Nonexistent: TTL='$NONEXIST_TTL'"
+echo "Tests passed: $TESTS_PASSED/4"
+
+
+
+
+
+
+
+
+
+
+
+
+

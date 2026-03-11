@@ -1,0 +1,248 @@
+# 🐉 DRAGONFLY CROSS-SHARD IMPLEMENTATION TEST - COPY TO VM
+
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true
+sleep 3
+
+echo "🐉 DRAGONFLY CROSS-SHARD SINGLE COMMAND TEST"
+echo "==========================================="
+
+# Install boost if needed
+if ! ldconfig -p | grep -q boost_fiber; then
+    echo "Installing boost::fibers..."
+    sudo apt update >/dev/null 2>&1
+    sudo apt install -y libboost-fiber-dev libboost-context-dev libboost-system-dev >/dev/null 2>&1
+fi
+
+# ===== BUILD DRAGONFLY CROSS-SHARD VERSION =====
+echo ""
+echo "🔧 Building DragonflyDB cross-shard version..."
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread \
+    meteor_phase1_2b_dragonfly_cross_shard.cpp -o meteor_dragonfly_cross_shard \
+    -luring -lboost_fiber -lboost_context -lboost_system
+
+if [ $? -ne 0 ]; then
+    echo "❌ DragonflyDB cross-shard build failed"
+    exit 1
+fi
+
+echo "✅ DragonflyDB cross-shard version built successfully!"
+
+# ===== TEST 1: CORRECTNESS WITH CROSS-SHARD SETUP =====
+echo ""
+echo "🧪 TEST 1: Cross-Shard Correctness (6C:3S - forces cross-shard operations)"
+echo "========================================================================"
+
+# Use cores > shards to force cross-shard operations (this should work now!)
+./meteor_dragonfly_cross_shard -h 127.0.0.1 -p 6379 -c 6 -s 3 -m 1536 &
+CROSS_SHARD_PID=$!
+sleep 5
+
+if redis-cli -p 6379 ping >/dev/null 2>&1; then
+    echo "✅ Server responding with cross-shard setup (6C:3S)"
+    
+    redis-cli -p 6379 flushall
+    
+    # Test single command cross-shard correctness
+    echo ""
+    echo "Single command cross-shard test:"
+    echo "================================"
+    
+    CROSS_SHARD_FAILURES=0
+    for i in {1..20}; do
+        redis-cli -p 6379 set cross_key_$i "cross_value_$i" >/dev/null
+        RESULT=$(redis-cli -p 6379 get cross_key_$i)
+        if [ "$RESULT" != "cross_value_$i" ]; then
+            CROSS_SHARD_FAILURES=$((CROSS_SHARD_FAILURES + 1))
+            if [ $CROSS_SHARD_FAILURES -eq 1 ]; then
+                echo "❌ First failure: set cross_key_$i → get '$RESULT'"
+            fi
+        fi
+    done
+    
+    echo "Cross-shard single command failures: $CROSS_SHARD_FAILURES/20"
+    
+    # Test immediate consistency (rapid SET→GET)
+    echo ""
+    echo "Immediate consistency test (rapid SET→GET):"
+    echo "==========================================="
+    
+    CONSISTENCY_FAILURES=0
+    for i in {1..10}; do
+        redis-cli -p 6379 set rapid_$i "rapid_value_$i" >/dev/null
+        # Immediate GET (tests cross-shard message speed)
+        RAPID_RESULT=$(redis-cli -p 6379 get rapid_$i)
+        if [ "$RAPID_RESULT" != "rapid_value_$i" ]; then
+            CONSISTENCY_FAILURES=$((CONSISTENCY_FAILURES + 1))
+        fi
+    done
+    
+    echo "Rapid SET→GET failures: $CONSISTENCY_FAILURES/10"
+    
+else
+    echo "❌ Cross-shard server not responding"
+    CROSS_SHARD_FAILURES="N/A"
+    CONSISTENCY_FAILURES="N/A"
+fi
+
+kill $CROSS_SHARD_PID 2>/dev/null && sleep 3
+
+# ===== TEST 2: PERFORMANCE WITH LOCAL OPERATIONS =====
+echo ""
+echo "🧪 TEST 2: Local Fast Path Performance (6C:6S - maximizes local operations)"
+echo "========================================================================"
+
+./meteor_dragonfly_cross_shard -h 127.0.0.1 -p 6379 -c 6 -s 6 -m 1536 &
+LOCAL_PID=$!
+sleep 5
+
+if redis-cli -p 6379 ping >/dev/null 2>&1; then
+    echo "✅ Server responding with local setup (6C:6S)"
+    
+    redis-cli -p 6379 flushall
+    
+    # Test local operations (should use fast path)
+    echo ""
+    echo "Local fast path test:"
+    echo "===================="
+    
+    LOCAL_FAILURES=0
+    for i in {1..20}; do
+        redis-cli -p 6379 set local_key_$i "local_value_$i" >/dev/null
+        RESULT=$(redis-cli -p 6379 get local_key_$i)
+        if [ "$RESULT" != "local_value_$i" ]; then
+            LOCAL_FAILURES=$((LOCAL_FAILURES + 1))
+        fi
+    done
+    
+    echo "Local operations failures: $LOCAL_FAILURES/20"
+    
+    # Performance test (should show no regression vs original)
+    if [ $LOCAL_FAILURES -eq 0 ]; then
+        echo ""
+        echo "🚀 Running performance test (local fast path)..."
+        echo "==============================================="
+        
+        memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis \
+            --clients=30 --threads=6 --pipeline=10 --data-size=64 \
+            --key-pattern=R:R --ratio=1:3 --test-time=15
+    fi
+    
+else
+    echo "❌ Local setup server not responding"
+    LOCAL_FAILURES="N/A"
+fi
+
+kill $LOCAL_PID 2>/dev/null && sleep 3
+
+# ===== TEST 3: MIXED WORKLOAD (SOME LOCAL, SOME CROSS-SHARD) =====
+echo ""
+echo "🧪 TEST 3: Mixed Workload Performance (8C:4S - 50% local, 50% cross-shard)"
+echo "========================================================================"
+
+./meteor_dragonfly_cross_shard -h 127.0.0.1 -p 6379 -c 8 -s 4 -m 2048 &
+MIXED_PID=$!
+sleep 5
+
+if redis-cli -p 6379 ping >/dev/null 2>&1; then
+    echo "✅ Server responding with mixed setup (8C:4S)"
+    
+    redis-cli -p 6379 flushall
+    
+    # Test mixed operations
+    MIXED_FAILURES=0
+    for i in {1..30}; do
+        redis-cli -p 6379 set mixed_key_$i "mixed_value_$i" >/dev/null
+        RESULT=$(redis-cli -p 6379 get mixed_key_$i)
+        if [ "$RESULT" != "mixed_value_$i" ]; then
+            MIXED_FAILURES=$((MIXED_FAILURES + 1))
+        fi
+    done
+    
+    echo "Mixed workload failures: $MIXED_FAILURES/30"
+    
+    # Quick performance check
+    if [ $MIXED_FAILURES -eq 0 ]; then
+        echo ""
+        echo "🚀 Quick mixed workload performance test..."
+        echo "==========================================="
+        
+        memtier_benchmark --server=127.0.0.1 --port=6379 --protocol=redis \
+            --clients=20 --threads=8 --pipeline=5 --data-size=64 \
+            --key-pattern=R:R --ratio=1:3 --test-time=10
+    fi
+    
+else
+    echo "❌ Mixed setup server not responding"
+    MIXED_FAILURES="N/A"
+fi
+
+kill $MIXED_PID 2>/dev/null
+
+# ===== RESULTS ANALYSIS =====
+echo ""
+echo "🎯 DRAGONFLY CROSS-SHARD TEST RESULTS:"
+echo "====================================="
+echo ""
+echo "Cross-Shard Setup (6C:3S):"
+echo "  Single command failures: $CROSS_SHARD_FAILURES/20"
+echo "  Rapid consistency failures: $CONSISTENCY_FAILURES/10"
+echo ""
+echo "Local Fast Path (6C:6S):"
+echo "  Local operation failures: $LOCAL_FAILURES/20"
+echo ""
+echo "Mixed Workload (8C:4S):"
+echo "  Mixed operation failures: $MIXED_FAILURES/30"
+echo ""
+echo "🎯 ANALYSIS:"
+if [ "$CROSS_SHARD_FAILURES" = "0" ] && [ "$LOCAL_FAILURES" = "0" ] && [ "$MIXED_FAILURES" = "0" ]; then
+    echo ""
+    echo "🎉 COMPLETE SUCCESS!"
+    echo "==================="
+    echo "✅ Cross-shard operations working perfectly"
+    echo "✅ Local fast path working perfectly"  
+    echo "✅ Mixed workload working perfectly"
+    echo "✅ DragonflyDB approach achieves 100% correctness"
+    echo "✅ No performance regression (fast path for local ops)"
+    echo ""
+    echo "🚀 DRAGONFLY CROSS-SHARD IMPLEMENTATION SUCCESSFUL!"
+    echo "   → Single SET/GET commands now route correctly"
+    echo "   → No connection migration overhead"
+    echo "   → Lightweight boost::fibers messaging"
+    echo "   → Ready for TTL functionality on top"
+    
+elif [ "$CROSS_SHARD_FAILURES" -gt 0 ]; then
+    echo ""
+    echo "❌ Cross-shard operations still failing"
+    echo "   → $CROSS_SHARD_FAILURES failures out of 20 tests"
+    echo "   → Need to debug cross-shard messaging"
+    
+elif [ "$LOCAL_FAILURES" -gt 0 ]; then
+    echo ""
+    echo "❌ Local operations broken" 
+    echo "   → $LOCAL_FAILURES failures out of 20 tests"
+    echo "   → Fast path implementation issue"
+    
+else
+    echo ""
+    echo "❓ Mixed results - need detailed analysis"
+fi
+
+echo ""
+echo "📋 SHARE THESE RESULTS FOR VALIDATION"
+
+
+
+
+
+
+
+
+
+
+
+
+

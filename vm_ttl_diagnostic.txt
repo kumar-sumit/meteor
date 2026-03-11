@@ -1,0 +1,141 @@
+# 🔍 VM TTL DIAGNOSTIC COMMANDS - COPY THESE TO VM
+
+# ===== STEP 1: SSH TO VM =====
+gcloud compute ssh --zone "asia-southeast1-a" "memtier-benchmarking" --tunnel-through-iap --project "<your-gcp-project-id>"
+
+# ===== STEP 2: BUILD DIAGNOSTIC VERSION =====
+cd /mnt/externalDisk/meteor
+export TMPDIR=/dev/shm
+pkill -f meteor 2>/dev/null || true
+sleep 3
+
+g++ -std=c++17 -O3 -DHAS_LINUX_EPOLL -march=native -mavx2 -mavx -msse4.2 -pthread -o meteor_debug meteor_commercial_lru_ttl_routing_consistent.cpp -luring
+
+# ===== STEP 3: START SERVER =====
+./meteor_debug -h 127.0.0.1 -p 6379 -c 12 -s 4 -m 2048 &
+SERVER_PID=$!
+sleep 5
+redis-cli -p 6379 ping
+
+# ===== STEP 4: TTL ALWAYS -2 DIAGNOSTIC =====
+redis-cli -p 6379 flushall
+
+echo "🔍 DIAGNOSTIC: Why TTL always returns -2"
+echo "========================================"
+
+# Test 1: Basic SET and GET
+echo "Test 1: Verify SET and GET work"
+redis-cli -p 6379 set debug_key_1 "test value"
+GET_RESULT=$(redis-cli -p 6379 get debug_key_1)
+echo "GET debug_key_1 -> '$GET_RESULT'"
+
+if [ "$GET_RESULT" = "test value" ]; then
+    echo "✅ SET and GET working"
+    
+    # Now test TTL on same key
+    TTL_RESULT=$(redis-cli -p 6379 ttl debug_key_1)
+    echo "TTL debug_key_1 -> $TTL_RESULT"
+    
+    if [ "$TTL_RESULT" = "-1" ]; then
+        echo "🎉 TTL working! Issue was routing consistency."
+    elif [ "$TTL_RESULT" = "-2" ]; then
+        echo "❌ BUG FOUND: TTL can't find key that GET can find!"
+        echo "🐛 This means TTL is hitting different cache instance"
+    fi
+else
+    echo "❌ SET/GET broken - fundamental issue"
+fi
+
+# Test 2: Test key with TTL
+echo ""
+echo "Test 2: Key with TTL (always returning -2?)"
+redis-cli -p 6379 set debug_key_2 "has ttl" EX 300
+GET_TTL_KEY=$(redis-cli -p 6379 get debug_key_2)
+TTL_TTL_KEY=$(redis-cli -p 6379 ttl debug_key_2)
+
+echo "SET debug_key_2 EX 300"
+echo "GET debug_key_2 -> '$GET_TTL_KEY'"
+echo "TTL debug_key_2 -> $TTL_TTL_KEY"
+
+if [ "$GET_TTL_KEY" = "has ttl" ] && [ "$TTL_TTL_KEY" = "-2" ]; then
+    echo "❌ CONFIRMED BUG: GET finds key but TTL returns -2"
+    echo "🐛 TTL method hitting different cache than SET/GET"
+elif [ "$GET_TTL_KEY" = "has ttl" ] && [ "$TTL_TTL_KEY" -gt 0 ]; then
+    echo "✅ TTL with EX working correctly!"
+fi
+
+# ===== STEP 5: SINGLE CORE TEST =====
+echo ""
+echo "🔍 Testing with single core (eliminate all routing)"
+kill $SERVER_PID 2>/dev/null || true
+sleep 3
+
+./meteor_debug -h 127.0.0.1 -p 6379 -c 1 -s 1 -m 512 &
+SINGLE_PID=$!
+sleep 4
+redis-cli -p 6379 ping
+
+redis-cli -p 6379 flushall
+
+echo "Single core test:"
+redis-cli -p 6379 set single_key "single value"
+GET_SINGLE=$(redis-cli -p 6379 get single_key)
+TTL_SINGLE=$(redis-cli -p 6379 ttl single_key)
+
+echo "GET single_key -> '$GET_SINGLE'"
+echo "TTL single_key -> $TTL_SINGLE"
+
+if [ "$GET_SINGLE" = "single value" ] && [ "$TTL_SINGLE" = "-1" ]; then
+    echo "✅ Single core works perfectly!"
+    echo "🐛 CONFIRMED: Multi-core routing was the problem"
+elif [ "$GET_SINGLE" = "single value" ] && [ "$TTL_SINGLE" = "-2" ]; then
+    echo "❌ Even single core fails!"
+    echo "🐛 CONFIRMED: TTL method logic error (not routing)"
+else
+    echo "❌ Single core has other issues"
+fi
+
+# ===== STEP 6: CLEANUP =====
+kill $SINGLE_PID 2>/dev/null || true
+
+# ===== RESULTS INTERPRETATION =====
+echo ""
+echo "🏆 DIAGNOSTIC RESULTS INTERPRETATION"
+echo "==================================="
+echo ""
+echo "SCENARIO 1: Multi-core fails, single-core works"
+echo "  → ISSUE: Routing still inconsistent"  
+echo "  → SOLUTION: Need to debug core assignment logic"
+echo ""
+echo "SCENARIO 2: Both multi-core and single-core fail"
+echo "  → ISSUE: TTL method logic error"
+echo "  → SOLUTION: Need to debug TTL method implementation"
+echo ""
+echo "SCENARIO 3: Both work"
+echo "  → ISSUE: Fixed!"
+echo "  → SOLUTION: Routing consistency fix worked"
+echo ""
+echo "📋 SHARE YOUR RESULTS:"
+echo "1. Multi-core GET result"
+echo "2. Multi-core TTL result" 
+echo "3. Single-core GET result"
+echo "4. Single-core TTL result"
+EOF
+
+echo "📋 Diagnostic commands created in /tmp/ttl_diagnostic_commands.txt"
+echo ""
+echo "🧪 COPY AND RUN THESE COMMANDS ON VM:"
+cat /tmp/ttl_diagnostic_commands.txt
+
+
+
+
+
+
+
+
+
+
+
+
+
